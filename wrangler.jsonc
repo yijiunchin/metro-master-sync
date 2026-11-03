@@ -1,0 +1,17 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "metromastersync",
+  "account_id": "05f3506fbce39765993cba10adb9a70b",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "routes": [{ "pattern": "metromastersync.yijiun.com", "custom_domain": true }],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "r2_buckets": [{ "binding": "SAVES", "bucket_name": "metromastersync-saves" }],
+  "vars": { "GAME_ORIGIN": "https://metromaster.huangyouci.com" }
+  // 密碼以 secret 設定：wrangler secret put APP_PASSWORD
+}
