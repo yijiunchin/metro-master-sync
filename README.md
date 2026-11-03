@@ -1,0 +1,616 @@
+# Metro Master Sync
+
+[捷運規劃大師](https://metromaster.huangyouci.com/)（metromaster.huangyouci.com）的跨裝置存檔同步工具，跑在 Cloudflare Workers + R2 上。
+
+- 正式站：<https://metromastersync.yijiun.com>
+- 手機上玩到一半，可以到電腦上接著玩；想試新玩法時，先把現在的進度存到雲端，就不怕開新遊戲把舊紀錄蓋掉。
+- 登入只要一組密碼，不用帳號。
+- 支援 iPhone / Android / 桌機，Safari、Chrome、Firefox、Edge 都能用。
+
+任何人都可以用自己的 Cloudflare 帳號和網域部署一份，步驟見[部署到 Cloudflare](#部署到-cloudflare)。
+
+---
+
+## 目錄
+
+1. [運作原理](#運作原理)
+2. [兩種使用方式](#兩種使用方式)
+3. [管理介面功能](#管理介面功能)
+4. [自動儲存](#自動儲存)
+5. [部署到 Cloudflare](#部署到-cloudflare)
+6. [設定參數一覽](#設定參數一覽)
+7. [程式內的常數與數值](#程式內的常數與數值)
+8. [API 文件](#api-文件)
+9. [資料格式](#資料格式)
+10. [瀏覽器 localStorage 使用的 key](#瀏覽器-localstorage-使用的-key)
+11. [安全性](#安全性)
+12. [費用與用量](#費用與用量)
+13. [本機開發](#本機開發)
+14. [疑難排解](#疑難排解)
+15. [已知限制](#已知限制)
+16. [專案結構](#專案結構)
+
+---
+
+## 運作原理
+
+遊戲把進度存在**它自己網域**的 `localStorage`，key 都以 `transit-planner:` 開頭（大多是 `transit-planner:v4:*`）。瀏覽器的同源政策不允許其他網站讀取這些資料，所以這個工具提供兩種方式把資料拿出來：
+
+| | A. 我的網域版 `/play/` | B. 原網站 + 書籤小工具 |
+|---|---|---|
+| 遊戲網址 | `https://<你的網域>/play/` | `https://metromaster.huangyouci.com/` |
+| 怎麼載入同步程式 | Worker 轉接原遊戲時直接把程式插入頁面 | 在遊戲頁點一下書籤 |
+| 要不要設定書籤 | 不用 | 每台裝置、每個瀏覽器設一次 |
+| 自動儲存 | 有（預設開啟） | 沒有，要手動按儲存 |
+| 管理介面一鍵載入 | 有 | 要先設成「待匯入」，再到遊戲頁點書籤 |
+| 跳過推廣廣告倒數 | 有 | 沒有 |
+| 進度存放位置 | 你的網域的 localStorage | 原網站的 localStorage |
+
+兩種方式的進度**互不相通**（存在不同網域），但都可以存到同一份雲端，所以能透過雲端互相轉移。
+
+雲端存檔放在 Cloudflare R2。R2 的讀取和列表都是強一致的，A 裝置存完，B 裝置馬上就看得到。
+
+### 架構
+
+```
+瀏覽器 ──► Cloudflare Worker（src/worker.js）
+            ├─ /api/*   → 存檔 API（R2：SAVES）
+            ├─ /play/*  → 轉接 GAME_ORIGIN，插入 core.js + inject.js
+            └─ 其他     → 靜態檔案（public/：管理介面、core.js、inject.js）
+```
+
+---
+
+## 兩種使用方式
+
+### A. 我的網域版（推薦，不用書籤）
+
+1. 打開 `https://<你的網域>/`，輸入密碼登入。
+2. 點「我的網域版遊戲 → 開始玩」，或直接開 `https://<你的網域>/play/`。未登入時會先導到登入頁，登入後自動回到遊戲。
+3. 遊戲左上角（距離頂端安全區域 64px）會出現 🚇 按鈕，點開是同步面板：
+   - **存檔名稱 + 儲存目前進度**：把目前進度存成一筆新的雲端存檔（`source=manual`）。名稱欄位預設帶入目前進度來源存檔的名稱。
+   - **自動儲存**勾選框：說明見[自動儲存](#自動儲存)。旁邊顯示「上次 HH:MM」或「失敗：原因」。
+   - **存檔列表**：最多顯示 50 筆，依最後更新時間排序，按「載入」就能覆蓋目前進度。
+4. 手機可以用「加入主畫面」把 `/play/` 當成 App 開。
+
+`/play/` 另外做了這些處理：
+
+- **跳過自家推廣廣告的倒數**：Worker 在頁面插入 `<style>.promo-sheet{display:none!important}</style>`。遊戲本身會在廣告出現 300ms 後檢查廣告是否被隱藏，被隱藏就直接給獎勵並關閉。所以「看廣告解鎖」會立即完成，回首頁的插頁也不會擋住畫面。這些廣告是原作者推廣自己其他 App 的 house ad。付費購買（ALL ACCESS）的狀態**沒有**被修改。
+- **自動略過「下載 App」對話框**：手機開啟時遊戲會跳出下載 App 的對話框，程式會自動點「在網頁玩」（`.get-app .play-web`）。
+- **多分頁同步**：從管理介面或其他分頁載入存檔時，會透過 `BroadcastChannel('mms')` 通知所有開著的遊戲分頁先暫停寫入、再重新整理。背景分頁可能收不到訊息，所以回到前景時（`visibilitychange`）和收到 `storage` 事件時，也會檢查 `mms:import-at` 標記有沒有變。
+- 遊戲頁的回應會加上 `Cache-Control: no-store` 和 `X-Robots-Tag: noindex, nofollow`，並移除上游的 `set-cookie`、`content-security-policy`、`report-to`、`nel`、`alt-svc` 標頭。
+- 只轉接 `GET` / `HEAD`，其他方法回 `405`。
+
+### B. 原網站 + 書籤小工具
+
+1. 在管理介面登入後，到「原網站同步書籤」區塊：
+   - **桌機**：把「🚇 存檔同步」按鈕拖到書籤列。
+   - **iPhone / iPad Safari**：先把任意網頁加入書籤，按「複製書籤網址」，再到書籤管理把該書籤的網址改成剛剛複製的內容。
+   - **Android Chrome**：同上，編輯書籤網址後，在網址列輸入書籤名稱，從建議清單點它執行。
+2. 到 `metromaster.huangyouci.com` 的遊戲頁面點書籤，就會開出同步面板（再點一次會關閉）。
+3. 面板功能和 `/play/` 相同，但沒有自動儲存。
+
+書籤的內容長這樣，裡面帶有一年有效的登入 token，所以**不要分享給別人**：
+
+```js
+javascript:(function(){window.__MMS={"api":"https://<你的網域>","token":"<exp>.<sig>"};var s=document.createElement('script');s.src='https://<你的網域>/inject.js?t='+Date.now();document.body.appendChild(s);})();
+```
+
+token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤防護不會擋。原遊戲網站目前沒有 CSP，可以載入外部 script。如果原作者之後加上 CSP，書籤方式會失效，但 `/play/` 不受影響。
+
+### 載入存檔的流程（兩種方式共用）
+
+1. 跳出確認視窗。
+2. 從雲端下載存檔。
+3. 讓遊戲先把記憶體中的最新進度寫進 localStorage（`flushGame()`：模擬一次 `visibilitychange` 切到背景）。
+4. 如果目前有進度，先存一份「匯入前自動備份」（`source=auto-backup`）到雲端。
+5. 如果這筆是「待匯入」，清除待匯入標記。
+6. 暫停遊戲寫入：攔截 `Storage.prototype.setItem/removeItem`，擋掉所有 `transit-planner:` 開頭的寫入。這樣遊戲在重新整理前觸發的存檔，不會把舊進度寫回去。
+7. 刪除所有可同步的 key，寫入存檔的 key；寫入失敗會還原成原本的內容。
+8. 重新整理頁面。
+
+---
+
+## 管理介面功能
+
+網址 `https://<你的網域>/`。
+
+| 區塊 | 功能 |
+|---|---|
+| 登入 | 輸入密碼。登入後 token 存在 `localStorage['mms:token']`，同時設定 `/play/` 用的 HttpOnly Cookie。網址帶 `?next=play` 時，登入後自動跳到 `/play/`。 |
+| 我的網域版遊戲 | 「開始玩」→ `/play/`。「儲存目前進度」→ 把 `/play/` 的進度存到雲端，名稱預設為目前存檔名。旁邊顯示「本機有進度：名稱（KB）」。 |
+| 原網站同步書籤 | 拖曳或複製書籤網址，附各平台設定說明。 |
+| 待匯入 | 有待匯入存檔時顯示，可開啟遊戲或取消。 |
+| 雲端存檔 | 分成「釘選」「最近存檔」「歷史存檔」三區，依最後更新時間排序，最新的一筆標「最新」。 |
+
+每筆存檔的按鈕：
+
+| 按鈕 | 作用 |
+|---|---|
+| 載入到我的網域版 | 備份目前進度 → 寫入 → 通知其他分頁重新整理 → 跳到 `/play/` |
+| 匯入到原網站 | 設成「待匯入」（`PUT /api/pending`）並開啟原遊戲網站；在那裡點書籤就會出現一鍵載入。為了避免 Safari 擋掉 `await` 之後的 `window.open`，會先同步開好視窗再導向。 |
+| 下載 | 下載 `{version:1, keys:{...}}` JSON，檔名 `metromaster-<名稱>-<YYYY-MM-DD-HH-MM>.json` |
+| 改名 | `PATCH` 名稱 |
+| 釘選 / 取消釘選 | 釘選的存檔固定顯示在最上方 |
+| 刪除 | 永久刪除，無法復原 |
+
+其他：
+
+- **上傳備份檔**：可以上傳本工具下載的 JSON，或是外層包了 `{data:{keys}}` 的格式。存檔名稱用檔名（去掉 `.json`），`source=upload`。
+- **顯示匯入前備份**：預設隱藏 `auto-backup` 存檔（釘選的除外），勾選後才會顯示。
+- 來源標籤：`manual` 手動儲存、`auto-save` 自動儲存、`auto-backup` 匯入前備份、`upload` 檔案上傳。
+- 更新時間比建立時間晚 1 秒以上時，顯示「更新於 …」。
+- 每筆存檔會顯示摘要：城市・方案（或挑戰）：車站數 / 路線數 / 日運量，最多 12 個方案，依車站數排序。
+
+---
+
+## 自動儲存
+
+只在 `/play/` 有效。
+
+| 項目 | 值 |
+|---|---|
+| 預設 | 開啟 |
+| 開關位置 | 🚇 面板的「自動儲存」勾選框 |
+| 開關儲存位置 | `localStorage['mms:autosave-on']`（`'0'` = 關閉，其他值或沒有設定 = 開啟），每台裝置、每個瀏覽器分開 |
+| 觸發時機 | 頁面在前景時每 **30 秒**一次；切到背景（`visibilitychange` → hidden，等遊戲自己寫完再讀）；關閉頁面（`pagehide`） |
+| 跳過條件 | 已關閉、正在匯入（寫入被凍結）、沒有登入 token、沒有遊戲進度、進度雜湊和上次相同 |
+| 頁面關閉時 | 請求內容小於 **60,000** 字元時使用 `fetch(..., {keepalive:true})`，確保頁面關掉後仍會送出（瀏覽器的 keepalive 上限是 64KB） |
+| 雜湊 | FNV-1a 32-bit，先把 key 排序，所以和 key 順序無關；格式 `<長度>:<base36>` |
+
+**一直更新同一筆存檔**，不會每次新增一筆：
+
+- 第一次自動儲存時新增一筆 `source=auto-save` 的存檔，id 記在 `mms:autosave-id`，之後都用 `PUT /api/snapshots/:id` 覆寫。
+- 那筆被刪掉時（API 回「找不到」），會自動再新增一筆。
+- **載入自動儲存的存檔**：接續更新那一筆。所以手機玩到一半，到電腦載入同一筆繼續玩，兩邊更新的都是同一筆。
+- **載入手動存檔或其他存檔**：清除 `mms:autosave-id`。之後有變動時另外新增一筆同名的自動儲存，原本的存檔保持不變。
+- 剛載入時會記下存檔的雜湊，所以只是載入、沒有變動，不會馬上多出一筆自動儲存。
+- 自動儲存的名稱跟著 `mms:current` 的名稱走；裝置欄位每次更新成目前的裝置。
+
+---
+
+## 部署到 Cloudflare
+
+### 事前準備
+
+| 需要 | 說明 |
+|---|---|
+| Cloudflare 帳號 | 免費方案就夠用 |
+| 一個網域 | 必須已經加到同一個 Cloudflare 帳號，並使用 Cloudflare 的 DNS（nameserver 指向 Cloudflare）。沒有網域也可以用 `*.workers.dev`，見[不用自己的網域](#不用自己的網域workersdev)。 |
+| R2 | 第一次使用要在 Dashboard → R2 啟用（需要綁定付款方式，但免費額度內不收費） |
+| Node.js | **22 以上**（wrangler 4 的需求） |
+| Git / GitHub | 只有要用 GitHub Actions 自動部署時才需要 |
+
+### 1. 取得程式碼並安裝
+
+```sh
+git clone git@github.com:yijiunchin/metro-master-sync.git
+cd metro-master-sync
+npm install
+```
+
+### 2. 修改 `wrangler.jsonc`
+
+這是唯一**一定要改**的檔案。程式碼裡的網址都是從請求的 origin 算出來的，換網域不用改程式。
+
+```jsonc
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "metromastersync",                         // Worker 名稱，可自訂
+  "account_id": "<你的 Cloudflare Account ID>",       // ← 改成你的，或整行刪掉
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": false,
+  "routes": [{ "pattern": "sync.example.com", "custom_domain": true }], // ← 改成你的子網域
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "r2_buckets": [{ "binding": "SAVES", "bucket_name": "metromastersync-saves" }], // bucket 名稱可自訂
+  "vars": { "GAME_ORIGIN": "https://metromaster.huangyouci.com" }
+}
+```
+
+要改的地方：
+
+| 欄位 | 改成 | 備註 |
+|---|---|---|
+| `account_id` | 你的 Account ID | Dashboard 右側欄「Account ID」可以複製，或執行 `npx wrangler whoami`。刪掉這一行的話，wrangler 會用登入帳號或環境變數 `CLOUDFLARE_ACCOUNT_ID`。帳號有多個時，請務必填寫，避免部署到錯的帳號。 |
+| `routes[0].pattern` | 你的（子）網域，例如 `sync.example.com` | `custom_domain: true` 會自動建立 DNS 記錄和 SSL 憑證，不用自己加 DNS。這個主機名稱不能已經有其他 DNS 記錄。 |
+| `name` | 任意 | 選填。改了會變成另一個 Worker。 |
+| `r2_buckets[0].bucket_name` | 任意 | 選填。要和下一步建立的 bucket 名稱一樣。`binding` 必須維持 `SAVES`。 |
+
+不要改的地方：`main`、`assets.binding`（`ASSETS`）、`assets.run_worker_first`、`r2_buckets[0].binding`（`SAVES`）、`vars.GAME_ORIGIN`（除非原遊戲搬家）。
+
+### 3. 登入 Cloudflare
+
+```sh
+npx wrangler login     # 會開瀏覽器授權，請用「擁有該網域」的帳號
+npx wrangler whoami    # 確認帳號與 Account ID
+```
+
+### 4. 建立 R2 bucket
+
+```sh
+npx wrangler r2 bucket create metromastersync-saves
+```
+
+bucket 名稱要和 `wrangler.jsonc` 一致。
+
+### 5. 部署
+
+```sh
+npm run deploy         # 等同 npx wrangler deploy
+```
+
+### 6. 設定登入密碼
+
+```sh
+npx wrangler secret put APP_PASSWORD
+# 提示輸入時貼上密碼。建議用隨機產生的長密碼，例如：
+# openssl rand -base64 12
+```
+
+也可以到 Dashboard → Workers & Pages → `metromastersync` → Settings → Variables and Secrets，新增一個 **Secret** 類型的 `APP_PASSWORD`。
+
+secret 不會被之後的 `wrangler deploy` 覆蓋。還沒設定時，登入會回 `500 尚未設定 APP_PASSWORD`。
+
+### 7. 驗證
+
+1. 開 `https://<你的網域>/`，用密碼登入。
+2. 點「開始玩」，確認遊戲能正常載入、左上角有 🚇 按鈕。
+3. 蓋一條路線，在面板按「儲存目前進度」，回到管理介面確認有出現存檔。
+4. 換一台裝置登入，按「載入到我的網域版」，確認進度一樣。
+
+剛建立的網域可能要等幾分鐘 DNS 和憑證才會生效。如果本機一直連不上，見[疑難排解](#疑難排解)。
+
+### 改密碼
+
+再執行一次 `npx wrangler secret put APP_PASSWORD`（或在 Dashboard 修改）。token 是用密碼簽章的，所以改密碼後**所有裝置都要重新登入，所有書籤都要重新建立**。雲端存檔不受影響。如果書籤外流，改密碼就能讓它失效。
+
+### GitHub Actions 自動部署（選用）
+
+`.github/workflows/deploy.yml` 會在 push 到 `main`，或手動執行（workflow_dispatch）時，用 Node 22 跑 `npm ci` 和 `npx wrangler deploy`。
+
+1. 把專案推到自己的 GitHub repo。
+2. 到 Cloudflare Dashboard → My Profile → API Tokens → Create Token，用 **「Edit Cloudflare Workers」** 範本：
+   - Account Resources：選你的帳號。
+   - Zone Resources：選你的網域（自訂網域需要）。
+   - 這個範本包含 Workers Scripts、Workers Routes、Workers R2 Storage 等需要的權限。
+3. 到 GitHub repo → Settings → Secrets and variables → Actions，新增：
+
+   | Secret | 值 |
+   |---|---|
+   | `CLOUDFLARE_API_TOKEN` | 上一步的 API token |
+   | `CLOUDFLARE_ACCOUNT_ID` | 你的 Account ID |
+
+4. `APP_PASSWORD` **不用**放到 GitHub。它只在 Cloudflare 設定一次，之後的部署會沿用。
+5. R2 bucket 要先手動建立一次（第 4 步）。
+
+### 不用自己的網域（workers.dev）
+
+把 `wrangler.jsonc` 改成：
+
+```jsonc
+"workers_dev": true,
+// 刪掉 "routes" 這一行
+```
+
+部署後網址是 `https://metromastersync.<你的子網域>.workers.dev`，其他功能都一樣。
+
+### 移除
+
+```sh
+npx wrangler delete                                  # 刪除 Worker（自訂網域會一起移除）
+npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才能刪
+```
+
+刪除 bucket 前，先到 Dashboard → R2 → bucket 刪除裡面所有物件。需要保留存檔的話，先在管理介面逐筆「下載」。
+
+---
+
+## 設定參數一覽
+
+### Worker 環境變數與綁定
+
+| 名稱 | 類型 | 預設 / 範例 | 說明 |
+|---|---|---|---|
+| `APP_PASSWORD` | Secret（必填） | 無 | 登入密碼，也是 token 簽章的金鑰材料 |
+| `GAME_ORIGIN` | 一般變數 | `https://metromaster.huangyouci.com` | 原遊戲網站的 origin。`/play/` 轉接到這裡；CORS 也允許這個 origin（給書籤用）。結尾不要加 `/`。 |
+| `SAVES` | R2 綁定 | bucket `metromastersync-saves` | 存檔儲存空間 |
+| `ASSETS` | 靜態資源綁定 | 目錄 `./public` | 管理介面與前端 script |
+
+### `wrangler.jsonc` 其他欄位
+
+| 欄位 | 值 | 說明 |
+|---|---|---|
+| `compatibility_date` | `2026-10-01` | Workers 執行環境版本 |
+| `workers_dev` | `false` | 不開 `*.workers.dev` 網址，只用自訂網域 |
+| `assets.run_worker_first` | `["/api/*"]` | `/api/*` 一律先進 Worker。`/play/*` 在 `public/` 裡沒有對應檔案，所以也會進 Worker。 |
+
+### 硬編碼的原遊戲網址
+
+如果原遊戲換網域，除了 `GAME_ORIGIN`，還要改這三個地方：
+
+| 檔案 | 位置 |
+|---|---|
+| `public/inject.js` | `const GAME_HOST = 'metromaster.huangyouci.com'` |
+| `public/core.js` | `device()` 裡的 `location.hostname === 'metromaster.huangyouci.com'` |
+| `public/index.html` | `const GAME = 'https://metromaster.huangyouci.com/'` 以及說明文字的連結 |
+
+---
+
+## 程式內的常數與數值
+
+### `src/worker.js`
+
+| 常數 / 數值 | 值 | 用途 |
+|---|---|---|
+| `PREFIX` | `s/` | R2 中存檔物件的 key 前綴 |
+| `PENDING_KEY` | `meta/pending` | 「待匯入」標記的 R2 key |
+| `GAME_KEY_PREFIX` | `transit-planner:` | 存檔中每個 key 都必須以此開頭 |
+| `TOKEN_TTL` | `365 * 24 * 3600` 秒（1 年） | 登入 token 與 Cookie 有效期 |
+| `MAX_BODY` | `20 * 1024 * 1024`（20 MB） | 請求 `Content-Length` 上限，超過回 `413 存檔太大` |
+| 密碼錯誤延遲 | 800 ms | 減緩暴力猜密碼 |
+| HMAC 金鑰 | `'mms1|' + APP_PASSWORD`，SHA-256 | token 簽章 |
+| Cookie 名稱 | `mms_session` | `/play/*` 的登入驗證 |
+| Cookie 屬性 | `Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=31536000` | |
+| CORS `Access-Control-Max-Age` | `86400`（1 天） | preflight 快取 |
+| CORS 允許方法 | `GET, POST, PATCH, PUT, DELETE, OPTIONS` | |
+| CORS 允許標頭 | `Authorization, Content-Type` | |
+| CORS 允許來源 | `GAME_ORIGIN` 與本站 origin | 其他來源不回 `Access-Control-Allow-Origin` |
+| 存檔 id 格式 | `<Date.now() 的 base36>-<UUID 前 8 碼>` | 例：`mh5x2k1a-3f9c0b12`。API 路徑只接受 `[a-z0-9-]{1,40}` |
+| `name` 長度上限 | 80 字元 | 超過截斷 |
+| `device` 長度上限 | 60 字元 | |
+| `source` 長度上限 | 20 字元 | |
+| `summary` 長度上限 | 1200 字元（JSON 字串） | R2 自訂 metadata 總共只能 2KB |
+| 摘要方案數 | 最多 12 個，依車站數由多到少 | |
+| 列表分頁 | 每次向 R2 取 1000 筆，自動翻頁到底 | |
+| 列表排序 | `updatedAt` 由新到舊 | |
+
+### `public/core.js`
+
+| 常數 | 值 | 用途 |
+|---|---|---|
+| `PFX` | `transit-planner:` | 遊戲資料的 key 前綴 |
+| `LOCAL_ONLY` | `transit-planner:v4:lang`、`transit-planner:house-ad-last` | 各裝置自己的設定（語言、上次顯示廣告時間），不同步 |
+| 統計快取 | `transit-planner:v4:` 後面接 `stats`、`qstats`、`stats~N`、`stats.x`、`stats@city` 等 | 遊戲可以重算，不上傳以節省空間 |
+| 「有進度」判斷 | `/^transit-planner:v4:(?:broken\d?\.)?q?save/` | 只有解鎖紀錄、沒有存檔時視為沒有進度 |
+| `IMPORT_MARK` | `mms:import-at` | 匯入時寫入時間戳，通知其他分頁 |
+| `TOKEN_KEY` | `mms:token` | 登入 token |
+| `CURRENT_KEY` | `mms:current` | 目前進度對應的存檔 `{id, name, source}` |
+| `AUTOSAVE_ID_KEY` | `mms:autosave-id` | 自動儲存要更新的存檔 id |
+| `AUTOSAVE_HASH_KEY` | `mms:autosave-hash` | 上次自動儲存（或載入）時的進度雜湊 |
+| BroadcastChannel | `mms`，訊息 `flush` / `freeze` / `unfreeze` / `reload` | 同網域分頁之間協調 |
+| 裝置名稱 | 自動判斷 `iPhone`/`iPad`/`Android`/`Mac`/`Windows`/`Linux` · `Edge`/`Chrome`/`Firefox`/`Safari`；在 `/play/` 會加上「（我的網域）」 | 可在該網域的 localStorage 設定 `mms:device` 自訂 |
+
+### `public/inject.js`
+
+| 數值 | 值 | 用途 |
+|---|---|---|
+| `GAME_HOST` | `metromaster.huangyouci.com` | 書籤只在這個網域或 `/play/` 啟動，其他網站會提示前往遊戲 |
+| 自動儲存間隔 `INTERVAL` | 30,000 ms | |
+| 自動儲存開關 key | `mms:autosave-on` | |
+| 上次自動儲存時間 key | `mms:autosave-last` | |
+| keepalive 門檻 | 60,000 字元 | |
+| 面板列表 | 最多 50 筆 | |
+| 🚇 按鈕 | `left:12px; top: safe-area + 64px`，40×40px，`z-index: 2147483646` | |
+| 面板 | 最大寬度 420px，`z-index: 2147483647`，使用 Shadow DOM 隔離樣式；攔截 keydown/keyup/keypress/wheel，避免觸發遊戲快捷鍵 | |
+| 面板來源標籤 | `auto-save` 自動儲存、`auto-backup` 匯入前備份 | |
+
+### `public/index.html`
+
+| 數值 | 值 | 用途 |
+|---|---|---|
+| 通知其他分頁存檔後等待 | 300 ms | 給 `/play/` 分頁時間把記憶體中的進度寫入 |
+| 凍結寫入後等待 | 150 ms | 給其他分頁時間套用凍結 |
+| 提示訊息顯示時間 | 2,500 ms | |
+
+---
+
+## API 文件
+
+除了 `/api/login` 和 `/api/logout`，都需要 `Authorization: Bearer <token>` 標頭。驗證失敗回 `401 {"error":"請重新登入"}`。
+
+所有回應都是 JSON，帶 `Cache-Control: no-store`。錯誤格式為 `{"error":"訊息"}`。
+
+| 方法 | 路徑 | 請求內容 | 回應 |
+|---|---|---|---|
+| `POST` | `/api/login` | `{"password":"..."}` | `200 {"token","exp"}`，並設定 `mms_session` Cookie；密碼錯誤 `401 密碼錯誤` |
+| `POST` | `/api/logout` | — | `200 {"ok":true}`，清除 Cookie |
+| `GET` | `/api/me` | — | `200 {"ok":true}`（檢查 token 是否有效） |
+| `POST` | `/api/session` | — | 用 Bearer token 換發 `mms_session` Cookie，到期時間與 token 相同 |
+| `GET` | `/api/snapshots` | — | `{"snapshots":[Meta...],"pending":Pending\|null}` |
+| `POST` | `/api/snapshots` | `{"name","device","source","pinned","data"}` | `201 {"snapshot":Meta}` |
+| `GET` | `/api/snapshots/:id` | — | `{"snapshot":Meta,"data":Data}` |
+| `PATCH` | `/api/snapshots/:id` | `{"name"?, "pinned"?}` | `{"snapshot":Meta}`，只改 metadata |
+| `PUT` | `/api/snapshots/:id` | `{"data","name"?,"device"?}` | `{"snapshot":Meta}`，覆寫內容；保留建立時間、來源、釘選 |
+| `DELETE` | `/api/snapshots/:id` | — | `{"ok":true}`；如果它是待匯入，會一起清除 |
+| `GET` | `/api/pending` | — | `{"pending":Pending\|null}` |
+| `PUT` | `/api/pending` | `{"id"}` | `{"pending":Pending}`；存檔不存在回 `404` |
+| `DELETE` | `/api/pending` | — | `{"ok":true}` |
+| `GET`/`HEAD` | `/play`、`/play/*` | Cookie `mms_session` | 轉接 `GAME_ORIGIN`。`/play` 會 `301` 到 `/play/`；未登入 `302` 到 `/?next=play` |
+
+其他錯誤碼：`400`（JSON 格式錯誤、存檔格式錯誤、空存檔、key 不合法）、`404`（找不到存檔／API）、`413`（超過 20MB）、`500`（未設定密碼或伺服器錯誤）。
+
+範例：
+
+```sh
+BASE=https://sync.example.com
+TOKEN=$(curl -s -X POST $BASE/api/login -H 'Content-Type: application/json' \
+  -d '{"password":"你的密碼"}' | jq -r .token)
+
+curl -s $BASE/api/snapshots -H "Authorization: Bearer $TOKEN" | jq '.snapshots[0]'
+curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > save.json
+```
+
+---
+
+## 資料格式
+
+### Data（存檔內容）
+
+和遊戲內建的備份格式相同：
+
+```json
+{
+  "version": 1,
+  "keys": {
+    "transit-planner:v4:save": "...",
+    "transit-planner:v4:summary": "{\"stations\":12,\"lines\":3,\"riders\":45678}",
+    "transit-planner:v4:city": "taipei"
+  }
+}
+```
+
+規則：`version` 必須是 `1`，`keys` 不能是空的，每個 key 都要以 `transit-planner:` 開頭，值必須是字串。
+
+遊戲常見的 key：`save`、`summary`、`plans`、`records`、`unlock`、`city`、`~N`（方案 N）、`@city`（各城市）、`q*`（挑戰模式）。
+
+### Meta（存檔資訊）
+
+```json
+{
+  "id": "mh5x2k1a-3f9c0b12",
+  "name": "我的台北",
+  "device": "iPhone · Safari（我的網域）",
+  "source": "auto-save",
+  "createdAt": 1761811200000,
+  "updatedAt": 1761814800000,
+  "pinned": false,
+  "size": 48213,
+  "keyCount": 14,
+  "summary": {
+    "city": "taipei",
+    "slots": [{ "c": "taipei", "p": 1, "st": 12, "l": 3, "r": 45678 }]
+  }
+}
+```
+
+| 欄位 | 說明 |
+|---|---|
+| `source` | `manual`、`auto-save`、`auto-backup`、`upload`，也可以是其他自訂字串 |
+| `createdAt` / `updatedAt` | 毫秒時間戳 |
+| `size` | R2 物件大小（bytes） |
+| `summary.slots[].c` | 城市代碼 |
+| `summary.slots[].p` | 方案編號（數字），或挑戰 `q:<代碼>` |
+| `summary.slots[].st` / `l` / `r` | 車站數 / 路線數 / 日運量 |
+
+### Pending（待匯入）
+
+```json
+{ "id": "mh5x2k1a-3f9c0b12", "name": "我的台北", "at": 1761811200000 }
+```
+
+### R2 儲存結構
+
+| R2 key | 內容 |
+|---|---|
+| `s/<id>` | Data JSON；metadata 存在 R2 自訂 metadata（`name`、`device`、`source`、`createdAt`、`updatedAt`、`pinned`=`'1'`/`'0'`、`keyCount`、`summary`） |
+| `meta/pending` | Pending JSON |
+
+---
+
+## 瀏覽器 localStorage 使用的 key
+
+| Key | 網域 | 說明 |
+|---|---|---|
+| `transit-planner:*` | 原網站 / 你的網域 | 遊戲本身的資料 |
+| `mms:token` | 你的網域 | 登入 token |
+| `mms:current` | 你的網域（`/play/`）或原網站 | 目前進度來自哪筆存檔 |
+| `mms:import-at` | 同上 | 最近一次匯入的時間戳 |
+| `mms:autosave-on` | 你的網域 | 自動儲存開關 |
+| `mms:autosave-id` | 你的網域 | 自動儲存更新的存檔 id |
+| `mms:autosave-hash` | 你的網域 / 原網站 | 上次自動儲存或載入的雜湊 |
+| `mms:autosave-last` | 你的網域 | 上次自動儲存時間 |
+| `mms:device` | 任一 | 選填，自訂裝置名稱 |
+
+---
+
+## 安全性
+
+- **只有一組密碼**，沒有多使用者；所有登入的人看到同一份雲端存檔。適合個人使用。
+- 密碼比對使用 HMAC 加上 `timingSafeEqual`，避免時序攻擊；密碼錯誤會延遲 800ms 才回應。沒有鎖定次數，所以請用夠長的隨機密碼。
+- token 格式 `<到期秒數>.<HMAC-SHA256 簽章 base64url>`，伺服器不儲存 session，改密碼就會讓所有 token 失效。
+- `/play/*` 用 HttpOnly + Secure + SameSite=Lax 的 Cookie 驗證，網頁上的 JavaScript 讀不到。
+- API 只接受 Bearer token（不看 Cookie），所以不會被 CSRF 利用。
+- CORS 只允許 `GAME_ORIGIN` 和本站。
+- 書籤網址內含 token，等同密碼，不要分享或貼到公開的地方。
+- `/play/` 的頁面加上 `noindex, nofollow`，不會被搜尋引擎收錄。
+- 請只部署給自己使用。不要公開轉接原遊戲，也不要拿來營利，並尊重原作者的權利。
+
+---
+
+## 費用與用量
+
+一般個人使用都在免費額度內：
+
+| 服務 | 免費額度（以 Cloudflare 官方公告為準） | 本工具的用量 |
+|---|---|---|
+| Workers | 每天 100,000 次請求 | 開 `/play/` 時會轉接遊戲的每個資源。自動儲存在進度有變動時最多每 30 秒 1 次（每小時約 120 次） |
+| R2 儲存 | 10 GB / 月 | 每筆存檔通常幾十 KB |
+| R2 寫入（Class A） | 每月 100 萬次 | 每次儲存 1 次，列表 1 次 |
+| R2 讀取（Class B） | 每月 1,000 萬次 | |
+
+存檔不會自動清除。如果「匯入前備份」或歷史存檔太多，可以在管理介面刪除。
+
+---
+
+## 本機開發
+
+```sh
+echo 'APP_PASSWORD=test123' > .dev.vars   # .dev.vars 已在 .gitignore
+npm run dev                                # wrangler dev，預設 http://localhost:8787
+```
+
+- 本機的 R2 是模擬的，資料放在 `.wrangler/`。
+- `/play/` 在本機也能用（會連到真正的原遊戲網站）。
+- 書籤方式在本機測不了：從 https 的原遊戲網站連到 `http://localhost`，會被瀏覽器的 Private / Local Network Access 擋下。請部署後再測。
+- 程式碼沒有建置步驟，`public/` 是直接提供的靜態檔。
+
+---
+
+## 疑難排解
+
+| 狀況 | 原因與解法 |
+|---|---|
+| 部署時出現 `Could not find zone for <網域>` | 網域不在 `account_id` 指定的帳號裡。用 `npx wrangler whoami` 確認帳號，把 `account_id` 改成擁有該網域的帳號。 |
+| 部署時出現 R2 bucket 不存在 | 先執行 `npx wrangler r2 bucket create <bucket 名稱>`，名稱要和 `wrangler.jsonc` 一致。 |
+| 部署時出現自訂網域已有 DNS 記錄 | 到 DNS 刪除該主機名稱原本的記錄，或換一個子網域。 |
+| 剛部署完本機一直連不上 | 本機 DNS 可能快取了「查無此網域」。macOS：`sudo dscacheutil -flushcache; sudo killall -HUP mDNSResponder`；或用手機網路試試。 |
+| 登入時顯示「尚未設定 APP_PASSWORD」 | 執行 `npx wrangler secret put APP_PASSWORD`。 |
+| 書籤顯示「請重新登入」 | 密碼已更改，或 token 超過一年。到管理介面重新登入並重新建立書籤。 |
+| 點書籤沒反應（iPhone） | Safari 不能從網址列直接執行 `javascript:`，要從書籤選單點它。確認書籤網址是以 `javascript:` 開頭的完整內容。 |
+| 點書籤跳出「請在遊戲頁面使用」 | 只能在 `metromaster.huangyouci.com` 或 `/play/` 頁面使用。 |
+| 自動儲存顯示「失敗：…」 | 網路斷線或登入失效。恢復後下一個 30 秒週期會自動重試；登入失效就到管理介面重新登入。 |
+| 載入後進度沒變 | 確認載入時沒有其他瀏覽器分頁在原網站開著遊戲（原網站分頁不會收到重新整理通知）。 |
+| `/play/` 一直跳回登入頁 | Cookie 被清掉或過期。到管理介面登入一次就會重新設定 Cookie。 |
+
+---
+
+## 已知限制
+
+- 兩台裝置**同時**開著同一筆自動儲存在玩，會互相覆蓋，雲端留下最後上傳的那份。換裝置前先關掉另一台的遊戲。
+- 自動儲存只在 `/play/` 有效，原網站的書籤方式要手動按儲存。
+- `/play/` 和原網站的進度存在不同網域，彼此不會自動同步，要透過雲端存檔轉移。
+- 程式依賴遊戲目前的資料格式（`transit-planner:` 前綴、`.promo-sheet`、`.get-app .play-web` 等）。原遊戲大改版時可能需要調整。
+- 原遊戲如果加上 CSP，書籤方式會失效；`/play/` 會移除 CSP，所以不受影響。
+- 列表沒有分頁，存檔數量到上千筆時載入會變慢。
+
+---
+
+## 專案結構
+
+```
+metro-master-sync/
+├─ wrangler.jsonc               # Worker 設定：網域、R2、靜態檔、環境變數
+├─ package.json                 # 只有 wrangler 一個開發依賴
+├─ src/
+│  └─ worker.js                 # API、認證、/play/ 轉接與注入
+├─ public/                      # 靜態檔（ASSETS）
+│  ├─ index.html                # 管理介面
+│  ├─ core.js                   # 共用：讀寫 localStorage、凍結寫入、雜湊、API client
+│  └─ inject.js                 # 遊戲頁上的 🚇 面板、自動儲存、略過下載 App 對話框
+└─ .github/workflows/deploy.yml # push 到 main 時自動部署
+```
