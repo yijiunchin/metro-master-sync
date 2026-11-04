@@ -253,6 +253,7 @@
         <button class="primary" data-act="load-play">載入到我的網域版</button>
         <button data-act="import">匯入到原網站</button>
         <button data-act="download">下載</button>
+        <button data-act="unlock-all" title="把這筆存檔補成全解（ALL ACCESS）：計劃 4/5、自訂顏色、區間 3">解鎖全部</button>
         <button data-act="rename">改名</button>
         <button data-act="pin">${s.pinned ? '取消釘選' : '釘選'}</button>
         <button class="danger" data-act="delete">刪除</button>
@@ -465,6 +466,19 @@
           a.download = `metromaster-${(s.name || 'save').replace(/[\\/:*?"<>|]/g, '_')}-${stamp}.json`;
           a.click();
           setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+          break;
+        }
+        case 'unlock-all': {
+          // 把這筆雲端存檔補成全解：只改 unlocked 紀錄的 owned 欄位，其他內容保留
+          const r = await api('/api/snapshots/' + id);
+          if (C.unlockOwned(r.data)) {
+            toast('這筆存檔已經全解了');
+            break;
+          }
+          C.applyUnlockAll(r.data);
+          await api('/api/snapshots/' + id, { method: 'PUT', body: JSON.stringify({ data: r.data }) });
+          await refresh();
+          toast('已補上全部解鎖（計劃 4/5・自訂顏色・區間 3）');
           break;
         }
         case 'rename': {

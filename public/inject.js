@@ -21,6 +21,27 @@
     return;
   }
 
+  // 「解鎖全部（ALL ACCESS）」開關：勾了就在存檔/自動儲存時把商店紀錄補成 owned。
+  // 開關存在本機（每台裝置、每個網域分開），預設關閉，是非破壞性的——關掉不會移除已補上的全解。
+  const UNLOCK_ON_KEY = 'mms:unlock-all';
+
+  // 讀本機進度；勾了「解鎖全部」就一併把 transit-planner:v4:unlock 補成 owned
+  function readGame(C) {
+    const data = C.readLocal();
+    if (C.get(UNLOCK_ON_KEY) === '1') C.applyUnlockAll(data);
+    return data;
+  }
+
+  // 就地把本機進度的商店紀錄補成全解（只改 unlock 這一個 key，不碰其他；已在匯入時不處理）
+  function patchLocalUnlock(C) {
+    if (C.isFrozen()) return true;
+    const data = C.readLocal();
+    if (C.unlockOwned(data)) return true; // 已經是全解
+    C.applyUnlockAll(data);
+    C.set(C.UNLOCK_KEY, data.keys[C.UNLOCK_KEY]);
+    return false;
+  }
+
   if (window.MMSCore) start();
   else {
     const s = document.createElement('script');
@@ -166,7 +187,7 @@
 
     async function save() {
       if (!auto.enabled() || C.isFrozen() || !getToken()) return;
-      const data = C.readLocal();
+      const data = readGame(C);
       if (!C.hasProgress(data)) return;
       const hash = C.hashData(data);
       if (hash === C.get(C.AUTOSAVE_HASH_KEY)) return;
@@ -258,6 +279,8 @@
   .auto { display: flex; align-items: center; gap: 6px; padding-bottom: 10px; border-bottom: 1px solid #e3e6ea; margin-bottom: 4px; cursor: pointer; }
   .auto input { flex: none; width: 18px; height: 18px; margin: 0; }
   .auto .muted { margin: 0 0 0 auto; }
+  .unlock { display: flex; align-items: center; gap: 6px; padding-top: 10px; border-top: 1px solid #e3e6ea; margin-top: 8px; cursor: pointer; }
+  .unlock input { flex: none; width: 18px; height: 18px; margin: 0; }
   .tag { font-size: 11px; padding: 1px 6px; border-radius: 6px; background: #ddf4ff; color: #0550ae; margin-left: 4px; }
 </style>
 <div class="backdrop"></div>
@@ -269,6 +292,7 @@
       <button class="primary" data-act="save">儲存目前進度</button>
     </div>
     ${auto ? '<label class="auto"><input type="checkbox" id="auto" /> 自動儲存<span class="muted" id="auto-state"></span></label>' : ''}
+    <label class="unlock"><input type="checkbox" id="unlock-all" /> 解鎖全部功能（計劃 4/5・自訂顏色・區間 3）</label>
     <div class="status" id="status"></div>
     <div id="pending"></div>
     <div id="list"><div class="muted">載入中…</div></div>
@@ -331,7 +355,7 @@
 
     async function saveCurrent(name, source = 'manual') {
       C.flushGame();
-      const data = C.readLocal();
+      const data = readGame(C);
       if (!C.hasProgress(data)) throw new Error('這個瀏覽器目前沒有遊戲進度');
       const res = await api('/api/snapshots', {
         method: 'POST',
@@ -416,6 +440,25 @@
       const off = auto.onChange(renderAuto);
       box.addEventListener('change', () => auto.setEnabled(box.checked));
       renderAuto();
+    }
+
+    // 「解鎖全部（ALL ACCESS）」：勾了就在存檔/自動儲存時補上 owned；勾上時也立刻補本機，重新載入後生效
+    const unlockBox = $('#unlock-all');
+    if (unlockBox) {
+      unlockBox.checked = C.get(UNLOCK_ON_KEY) === '1';
+      unlockBox.addEventListener('change', () => {
+        C.set(UNLOCK_ON_KEY, unlockBox.checked ? '1' : '0');
+        if (unlockBox.checked) {
+          try {
+            const already = patchLocalUnlock(C);
+            setStatus(already ? '這筆進度已是全解' : '已補上全解，重新載入遊戲畫面後生效（之後自動儲存也會帶上）');
+          } catch (e) {
+            setStatus('補上全解失敗：' + e.message, true);
+          }
+        } else {
+          setStatus('已停止強制全解（已補上的全解保留、不移除）');
+        }
+      });
     }
 
     refresh();

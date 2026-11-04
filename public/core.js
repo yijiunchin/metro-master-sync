@@ -73,6 +73,52 @@
   // 只有解鎖紀錄、沒有任何存檔時不算有進度
   const hasProgress = (data) => Object.keys(data.keys).some((k) => /^transit-planner:v4:(?:broken\d?\.)?q?save/.test(k));
 
+  // 商店解鎖紀錄：遊戲把這份的 owned:true 視為已買 unlock_all（ALL ACCESS），
+  // 會一併解鎖 計劃 4/5、自訂顏色、區間 3 等。
+  const UNLOCK_KEY = 'transit-planner:v4:unlock';
+
+  function parseUnlock(data) {
+    const raw = data.keys[UNLOCK_KEY];
+    if (raw == null) return null;
+    try {
+      const o = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      return o && typeof o === 'object' && !Array.isArray(o) ? o : null;
+    } catch {
+      return null;
+    }
+  }
+
+  // 這筆存檔是否已是全解（owned）
+  function unlockOwned(data) {
+    const rec = parseUnlock(data);
+    return !!(rec && rec.owned === true);
+  }
+
+  // 就把存檔補成全解：保留原本的 unlocked 等欄位，只把 owned 設成 true；
+  // 紀錄缺損時改用遊戲的預設形狀（與遊戲自己的建檔一致）。
+  function applyUnlockAll(data) {
+    let rec = parseUnlock(data);
+    if (rec) {
+      rec.owned = true;
+      if (!Array.isArray(rec.unlocked)) rec.unlocked = [];
+    } else {
+      rec = {
+        installedAt: Date.now(),
+        sessions: 0,
+        unlocked: [],
+        owned: true,
+        lastInterstitialAt: null,
+        lastRewardedAt: null,
+        day: new Date().toISOString().slice(0, 10),
+        shownToday: 0,
+        buyPendingAt: null,
+        privacyRequired: false,
+      };
+    }
+    data.keys[UNLOCK_KEY] = JSON.stringify(rec);
+    return rec;
+  }
+
   // 進度雜湊（與 key 順序無關），用來判斷自動儲存是否需要上傳
   function hashData(data) {
     const text = JSON.stringify(Object.keys(data.keys).sort().map((k) => [k, data.keys[k]]));
@@ -281,11 +327,15 @@
 
   window.MMSCore = {
     PFX,
+    UNLOCK_KEY,
     IMPORT_MARK,
     TOKEN_KEY,
     CURRENT_KEY,
     AUTOSAVE_ID_KEY,
     AUTOSAVE_HASH_KEY,
+    parseUnlock,
+    unlockOwned,
+    applyUnlockAll,
     freezeWrites,
     unfreezeWrites,
     isFrozen,

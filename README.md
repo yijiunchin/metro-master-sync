@@ -159,6 +159,7 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 | 載入到我的網域版 | 備份目前進度 → 寫入 → 通知其他分頁重新整理 → 跳到 `/play/` |
 | 匯入到原網站 | 設成「待匯入」（`PUT /api/pending`）並開啟原遊戲網站；在那裡點書籤就會出現一鍵載入。為了避免 Safari 擋掉 `await` 之後的 `window.open`，會先同步開好視窗再導向。 |
 | 下載 | 下載 `{version:1, keys:{...}}` JSON，檔名 `metromaster-<名稱>-<YYYY-MM-DD-HH-MM>.json` |
+| 解鎖全部 | 把這筆存檔補成「全解」（`owned:true`，等同 `unlock_all`），一併解鎖 計劃 4/5、自訂顏色、區間 3。只改 `transit-planner:v4:unlock` 一個 key，其餘內容保留；已全解的不會重複改。見下方[解鎖全部功能](#解鎖全部功能可選)。 |
 | 改名 | `PATCH` 名稱 |
 | 釘選 / 取消釘選 | 釘選的存檔固定顯示在最上方 |
 | 刪除 | 永久刪除，無法復原 |
@@ -170,6 +171,30 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 - 來源標籤：`manual` 手動儲存、`auto-save` 自動儲存、`auto-backup` 匯入前備份、`upload` 檔案上傳。
 - 更新時間比建立時間晚 1 秒以上時，顯示「更新於 …」。
 - 每筆存檔會顯示摘要：城市・方案（或挑戰）：車站數 / 路線數 / 日運量，最多 12 個方案，依車站數排序。
+
+### 解鎖全部功能（可選）
+
+預設**關閉**。把存檔補成「全解」——遊戲商店紀錄的 `owned: true`（等同 `unlock_all` 購買），會一併解鎖：
+
+- **計劃 4、計劃 5**：方案數上限放开。
+- **自訂顏色**：可使用自訂線色。
+- **區間 3**：班次 / 服務上限放开。
+
+> 「自訂我的帳號名稱」是遊戲帳號的伺服器端功能，存檔改不到，所以這個功能**不含改名**；改名請回到遊戲裡用 Google/Apple 帳號自己改。
+
+兩處都能操作：
+
+| 位置 | 開關 | 作用 |
+|---|---|---|
+| 🚇 遊戲內面板 / 管理介面 | 勾「解鎖全部功能」 | 之後的「儲存目前進度」和**自動儲存**都會自動補上全解；勾上時也會**立刻**把本機進度補上，重新載入遊戲畫面後生效 |
+| 管理介面 | 每筆存檔的「解鎖全部」按鈕 | 只把**該筆雲端存檔**補成全解（`GET` 下來 → 補 `owned` → `PUT` 回去，保留建立時間、來源、釘選） |
+
+實作細節：
+
+- 遊戲的商店紀錄存在 `transit-planner:v4:unlock`（一個 JSON 字串，含 `owned`、`unlocked` 等欄位）。遊戲把 `owned: true` 視為 ALL ACCESS，所以補上它就等於解鎖上述項目。
+- 補寫時**保留原本的欄位**（已解項目、`sessions`、`day` 等），只有 `owned` 不是 `true` 時才翻過去；紀錄缺損或不存在時才改用遊戲的建檔預設。所以是**非破壞性**也是**冪等**的：再按一次不會拔除已補的全解，也沒有開關會移除既有全解。
+- 開關記在本機 `localStorage['mms:unlock-all']`（`'1'` = 開啟，其他 / 沒有 = 關閉；每台裝置、每個網域分開），預設關閉。
+- 這是**純前端**改寫，沒碰伺服器端。`/play/` 我方網域版把這份 unlock 只讀進遊戲記憶體，之後的寫入都會保留 `owned`，補上後不會被清掉。是否會被原作者的伺服器端驗證影響，視遊戲本身的實作為準。
 
 ---
 
@@ -422,6 +447,8 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | `LOCAL_ONLY` | `transit-planner:v4:lang`、`transit-planner:house-ad-last` | 各裝置自己的設定（語言、上次顯示廣告時間），不同步 |
 | 統計快取 | `transit-planner:v4:` 後面接 `stats`、`qstats`、`stats~N`、`stats.x`、`stats@city` 等 | 遊戲可以重算，不上傳以節省空間 |
 | 「有進度」判斷 | `/^transit-planner:v4:(?:broken\d?\.)?q?save/` | 只有解鎖紀錄、沒有存檔時視為沒有進度 |
+| `UNLOCK_KEY` | `transit-planner:v4:unlock` | 遊戲的商店解鎖紀錄（JSON 字串，含 `owned`、`unlocked` 等）；`applyUnlockAll` 把 `owned` 補成 `true`、保留其餘欄位，缺損才用遊戲預設建檔，是非破壞性、冪等的 |
+| `mms:unlock-all` | `'1'` = 開啟 | 「解鎖全部功能」開關（定義在 `inject.js`，每台裝置、每個網域分開），預設關閉；開啟後本機的存檔/自動儲存都會補上全解 |
 | `IMPORT_MARK` | `mms:import-at` | 匯入時寫入時間戳，通知其他分頁 |
 | `TOKEN_KEY` | `mms:token` | 登入 token |
 | `CURRENT_KEY` | `mms:current` | 目前進度對應的存檔 `{id, name, source}` |
@@ -574,6 +601,7 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
 | `mms:autosave-hash` | 你的網域 / 原網站 | 上次自動儲存或載入的雜湊 |
 | `mms:autosave-last` | 你的網域、原網站 | 上次自動儲存時間 |
 | `mms:device` | 任一 | 選填，自訂裝置名稱 |
+| `mms:unlock-all` | 你的網域、原網站 | 選填，`'1'` 開啟「解鎖全部功能」（預設關閉）；開啟後本機存檔/自動儲存補 `owned:true` |
 
 ---
 
