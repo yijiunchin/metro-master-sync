@@ -27,10 +27,18 @@
     const getToken = () => cfg.token || C.storedToken();
 
     if (!onPlay) {
-      if (getToken() || document.getElementById('mms-host')) return togglePanel(C, getToken, null);
+      // 第一次點書籤後就在這個分頁啟動自動儲存（重新整理頁面後要再點一次書籤）
+      const open = () => {
+        if (!window.__MMS_AUTO__) {
+          window.__MMS_AUTO__ = createAutoSave(C, getToken);
+          window.__MMS_AUTO__.run();
+        }
+        togglePanel(C, getToken, window.__MMS_AUTO__);
+      };
+      if (getToken() || document.getElementById('mms-host')) return open();
       // 書籤沒有內建 token：用遊戲帳號登入換發
       C.loginWithGame(API).then(
-        () => togglePanel(C, getToken, null),
+        open,
         (err) => alert('無法用遊戲帳號登入：' + err.message + '\n\n也可以到 ' + API + ' 用密碼登入後，建立內含登入資訊的書籤。'),
       );
       return;
