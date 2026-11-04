@@ -1,5 +1,17 @@
 // Metro Master Sync API：存檔快照存在 R2（讀寫與列表皆為強一致，跨裝置立即可見）。
 const PREFIX = 's/';
+// 自動儲存的歷史版本：v/<存檔 id>/<時間戳 base36，固定 9 碼以便排序>
+const VERSION_PREFIX = 'v/';
+const VERSION_MIN_GAP = 15 * 60 * 1000; // 兩個歷史版本至少相隔 15 分鐘
+const HOUR = 3600 * 1000;
+const DAY = 24 * HOUR;
+// 保留規則：[多久以內, 每個區間保留一份的區間長度]；超過最後一段的刪除
+const VERSION_TIERS = [
+  [2 * HOUR, 0], // 2 小時內：全部保留
+  [DAY, HOUR], // 24 小時內：每小時一份
+  [30 * DAY, DAY], // 30 天內：每天一份
+  [180 * DAY, 7 * DAY], // 180 天內：每週一份
+];
 const PENDING_KEY = 'meta/pending';
 const GAME_KEY_PREFIX = 'transit-planner:';
 const TOKEN_TTL = 365 * 24 * 3600; // 書籤內的 token 一年有效；改密碼即全部失效
@@ -80,6 +92,14 @@ async function route(request, env, url) {
     if (method === 'POST') return createSnapshot(request, env);
   }
 
+  const v = pathname.match(/^\/api\/snapshots\/([a-z0-9-]{1,40})\/versions(?:\/([a-z0-9]{9})(\/restore)?)?$/);
+  if (v) {
+    const [, id, vid, restore] = v;
+    if (!vid && method === 'GET') return listVersions(env, id);
+    if (vid && !restore && method === 'GET') return getVersion(env, id, vid);
+    if (vid && restore && method === 'POST') return restoreVersion(request, env, id, vid);
+  }
+
   const m = pathname.match(/^\/api\/snapshots\/([a-z0-9-]{1,40})$/);
   if (m) {
     const id = m[1];
@@ -88,6 +108,7 @@ async function route(request, env, url) {
     if (method === 'PUT') return replaceSnapshot(request, env, id);
     if (method === 'DELETE') {
       await env.SAVES.delete(PREFIX + id);
+      await deleteVersions(env, id);
       const pending = await readPending(env);
       if (pending?.id === id) await env.SAVES.delete(PENDING_KEY);
       return json({ ok: true });
@@ -451,8 +472,9 @@ async function createSnapshot(request, env) {
 async function replaceSnapshot(request, env, id) {
   const body = await readJson(request);
   const data = validateData(body.data);
-  const old = await env.SAVES.head(PREFIX + id);
+  const old = await env.SAVES.get(PREFIX + id);
   if (!old) throw new HttpError(404, '找不到這個存檔');
+  await archiveVersion(env, id, old);
   const meta = {
     ...old.customMetadata,
     updatedAt: String(Date.now()),
@@ -466,6 +488,125 @@ async function replaceSnapshot(request, env, id) {
     customMetadata: meta,
   });
   return json({ snapshot: toMeta({ key: PREFIX + id, size: obj.size, customMetadata: meta }) });
+}
+
+// ---------- 歷史版本 ----------
+
+const versionKey = (id, at) => `${VERSION_PREFIX}${id}/${at.toString(36).padStart(9, '0')}`;
+
+async function listVersionObjects(env, id) {
+  const out = [];
+  let cursor;
+  do {
+    const page = await env.SAVES.list({ prefix: `${VERSION_PREFIX}${id}/`, include: ['customMetadata'], cursor, limit: 1000 });
+    out.push(...page.objects);
+    cursor = page.truncated ? page.cursor : undefined;
+  } while (cursor);
+  return out;
+}
+
+const versionAt = (obj) => parseInt(obj.key.slice(obj.key.lastIndexOf('/') + 1), 36);
+
+// 依保留規則挑出要留下的版本（times 由新到舊）
+function keepVersions(times, now) {
+  const keep = new Set();
+  const seen = new Set();
+  for (const t of times) {
+    const age = now - t;
+    const tier = VERSION_TIERS.findIndex(([within]) => age < within);
+    if (tier < 0) continue;
+    const step = VERSION_TIERS[tier][1];
+    if (!step) {
+      keep.add(t);
+      continue;
+    }
+    // 同一區間只留最新的一份
+    const bucket = tier + ':' + Math.floor(t / step);
+    if (!seen.has(bucket)) {
+      seen.add(bucket);
+      keep.add(t);
+    }
+  }
+  return keep;
+}
+
+// 自動儲存覆寫前，把舊內容存成歷史版本，並清掉超出保留規則的版本
+async function archiveVersion(env, id, old) {
+  const at = Number(old.customMetadata?.updatedAt) || old.uploaded.getTime();
+  const objs = await listVersionObjects(env, id);
+  const times = objs.map(versionAt).sort((a, b) => b - a);
+  const now = Date.now();
+  if (!times.length || at - times[0] >= VERSION_MIN_GAP) {
+    await env.SAVES.put(versionKey(id, at), await old.arrayBuffer(), {
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: {
+        device: old.customMetadata?.device || '',
+        keyCount: old.customMetadata?.keyCount || '0',
+        summary: old.customMetadata?.summary || '',
+      },
+    });
+    times.unshift(at);
+  } else {
+    // 距離上一個版本太近，不另存；讀掉內容以釋放連線
+    await old.arrayBuffer();
+  }
+  const keep = keepVersions(times, now);
+  const drop = objs.filter((o) => !keep.has(versionAt(o))).map((o) => o.key);
+  for (let i = 0; i < drop.length; i += 1000) await env.SAVES.delete(drop.slice(i, i + 1000));
+}
+
+async function deleteVersions(env, id) {
+  const keys = (await listVersionObjects(env, id)).map((o) => o.key);
+  for (let i = 0; i < keys.length; i += 1000) await env.SAVES.delete(keys.slice(i, i + 1000));
+}
+
+function versionMeta(obj) {
+  const m = obj.customMetadata || {};
+  let summary = null;
+  try {
+    summary = m.summary ? JSON.parse(m.summary) : null;
+  } catch {}
+  const at = versionAt(obj);
+  return { vid: obj.key.slice(obj.key.lastIndexOf('/') + 1), at, device: m.device || '', keyCount: Number(m.keyCount) || 0, size: obj.size, summary };
+}
+
+async function listVersions(env, id) {
+  if (!(await env.SAVES.head(PREFIX + id))) throw new HttpError(404, '找不到這個存檔');
+  const versions = (await listVersionObjects(env, id)).map(versionMeta).sort((a, b) => b.at - a.at);
+  return json({ versions });
+}
+
+async function getVersion(env, id, vid) {
+  const obj = await env.SAVES.get(`${VERSION_PREFIX}${id}/${vid}`);
+  if (!obj) throw new HttpError(404, '找不到這個歷史版本');
+  return json({ version: versionMeta(obj), data: await obj.json() });
+}
+
+// 把歷史版本複製成一筆新的手動存檔，原本的自動儲存不受影響
+async function restoreVersion(request, env, id, vid) {
+  const body = await readJson(request).catch(() => ({}));
+  const [src, obj] = await Promise.all([env.SAVES.head(PREFIX + id), env.SAVES.get(`${VERSION_PREFIX}${id}/${vid}`)]);
+  if (!obj) throw new HttpError(404, '找不到這個歷史版本');
+  // 名稱由瀏覽器依本地時區組好傳來；沒傳時用 UTC 時間
+  const stamp = new Date(versionAt(obj)).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
+  const fallback = `${src?.customMetadata?.name || '自動儲存'}（${stamp} 版本）`;
+  const now = Date.now();
+  const newId = now.toString(36) + '-' + crypto.randomUUID().slice(0, 8);
+  const meta = {
+    name: clip(typeof body?.name === 'string' && body.name.trim() ? body.name.trim() : fallback, 80),
+    device: obj.customMetadata?.device || '',
+    source: 'restore',
+    createdAt: String(now),
+    updatedAt: String(now),
+    pinned: '0',
+    keyCount: obj.customMetadata?.keyCount || '0',
+    summary: obj.customMetadata?.summary || '',
+  };
+  const saved = await env.SAVES.put(PREFIX + newId, await obj.arrayBuffer(), {
+    httpMetadata: { contentType: 'application/json' },
+    customMetadata: meta,
+  });
+  return json({ snapshot: toMeta({ key: PREFIX + newId, size: saved.size, customMetadata: meta }) }, 201);
 }
 
 async function getSnapshot(env, id) {

@@ -162,13 +162,14 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 | 解鎖全部 | 把這筆存檔補成「全解」（`owned:true`，等同 `unlock_all`），一併解鎖 計劃 4/5、自訂顏色、區間 3。只改 `transit-planner:v4:unlock` 一個 key，其餘內容保留；已全解的不會重複改。見下方[解鎖全部功能](#解鎖全部功能可選)。 |
 | 改名 | `PATCH` 名稱 |
 | 釘選 / 取消釘選 | 釘選的存檔固定顯示在最上方 |
-| 刪除 | 永久刪除，無法復原 |
+| 歷史版本 | 只有自動儲存有。展開該筆的歷史版本列表，可以還原成新存檔或下載。見[歷史版本](#歷史版本)。 |
+| 刪除 | 永久刪除，無法復原；自動儲存的歷史版本也會一起刪除 |
 
 其他：
 
 - **上傳備份檔**：可以上傳本工具下載的 JSON，或是外層包了 `{data:{keys}}` 的格式。存檔名稱用檔名（去掉 `.json`），`source=upload`。
 - **顯示匯入前備份**：預設隱藏 `auto-backup` 存檔（釘選的除外），勾選後才會顯示。
-- 來源標籤：`manual` 手動儲存、`auto-save` 自動儲存、`auto-backup` 匯入前備份、`upload` 檔案上傳。
+- 來源標籤：`manual` 手動儲存、`auto-save` 自動儲存、`auto-backup` 匯入前備份、`upload` 檔案上傳、`restore` 從歷史版本還原。
 - 更新時間比建立時間晚 1 秒以上時，顯示「更新於 …」。
 - 每筆存檔會顯示摘要：城市・方案（或挑戰）：車站數 / 路線數 / 日運量，最多 12 個方案，依車站數排序。
 
@@ -200,7 +201,7 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 
 ## 自動儲存
 
-`/play/` 載入就啟動；原網站在點書籤後啟動，直到分頁關閉或重新整理。兩邊的開關、自動儲存的存檔各自分開（存在不同網域）。
+`/play/` 和裝了 userscript 的原網站，開遊戲就啟動；只用書籤的原網站，在點書籤後啟動，直到分頁關閉或重新整理。兩邊的開關、自動儲存的存檔各自分開（存在不同網域）。
 
 | 項目 | 值 |
 |---|---|
@@ -220,6 +221,23 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 - **載入手動存檔或其他存檔**：清除 `mms:autosave-id`。之後有變動時另外新增一筆同名的自動儲存，原本的存檔保持不變。
 - 剛載入時會記下存檔的雜湊，所以只是載入、沒有變動，不會馬上多出一筆自動儲存。
 - 自動儲存的名稱跟著 `mms:current` 的名稱走；裝置欄位每次更新成目前的裝置。
+
+### 歷史版本
+
+自動儲存每次覆寫雲端存檔之前，Worker 會先把被覆寫的舊內容存成一個歷史版本，所以就算存到一份玩壞的進度、匯入錯了，或被遊戲內建的雲端同步蓋掉，也能找回之前的狀態。
+
+| 項目 | 值 |
+|---|---|
+| 哪些存檔有 | 只有 `source=auto-save`（自動儲存）。手動存檔不會被覆寫，改名、釘選也不會產生版本 |
+| 最小間隔 | 被覆寫的舊內容，距離上一個版本不到 **15 分鐘**時不另存（避免每 30 秒存一份） |
+| 保留規則 | 2 小時內全部保留；2–24 小時每小時一份；1–30 天每天一份；30–180 天每週一份；超過 180 天刪除。每個區間保留最新的那份 |
+| 數量上限 | 每筆自動儲存約 80 份（實測模擬 200 天、每 5 分鐘自動儲存一次，保留 82 份） |
+| 清理時機 | 每次新增版本時順便清掉超出規則的版本；刪除存檔時一併刪除它的所有版本 |
+
+在管理介面的自動儲存項目按「歷史版本」，會在下方列出所有版本（時間、裝置、大小、前 3 個方案的摘要）：
+
+- **還原成新存檔**：把那個版本複製成一筆新的存檔（來源標籤「從歷史版本還原」，名稱是「原名稱（時間 版本）」），原本的自動儲存和其他版本都不變。之後就能像一般存檔一樣載入到我的網域版、匯入到原網站或下載。
+- **下載**：下載那個版本的 JSON，格式和一般存檔的下載相同。
 
 ---
 
@@ -421,6 +439,9 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | `GAME_KEY_PREFIX` | `transit-planner:` | 存檔中每個 key 都必須以此開頭 |
 | `TOKEN_TTL` | `365 * 24 * 3600` 秒（1 年） | 登入 token 與 Cookie 有效期 |
 | `MAX_BODY` | `20 * 1024 * 1024`（20 MB） | 請求 `Content-Length` 上限，超過回 `413 存檔太大` |
+| `VERSION_PREFIX` | `v/` | 歷史版本的 R2 key 前綴 |
+| `VERSION_MIN_GAP` | 15 分鐘 | 被覆寫的舊內容距上一個版本不到這個時間就不另存 |
+| `VERSION_TIERS` | 2h 全留、24h 每小時、30d 每天、180d 每週 | 歷史版本保留規則，超過最後一段刪除 |
 | `USERSCRIPT_VERSION` | `1.0.0` | userscript 的 `@version`；只有 userscript 本身內容改變時才需要調高，讓管理器提示更新 |
 | 密碼錯誤延遲 | 800 ms | 減緩暴力猜密碼 |
 | HMAC 金鑰 | `'mms1|' + APP_PASSWORD`，SHA-256 | token 簽章 |
@@ -500,8 +521,11 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | `POST` | `/api/snapshots` | `{"name","device","source","pinned","data"}` | `201 {"snapshot":Meta}` |
 | `GET` | `/api/snapshots/:id` | — | `{"snapshot":Meta,"data":Data}` |
 | `PATCH` | `/api/snapshots/:id` | `{"name"?, "pinned"?}` | `{"snapshot":Meta}`，只改 metadata |
-| `PUT` | `/api/snapshots/:id` | `{"data","name"?,"device"?}` | `{"snapshot":Meta}`，覆寫內容；保留建立時間、來源、釘選 |
-| `DELETE` | `/api/snapshots/:id` | — | `{"ok":true}`；如果它是待匯入，會一起清除 |
+| `PUT` | `/api/snapshots/:id` | `{"data","name"?,"device"?}` | `{"snapshot":Meta}`，覆寫內容；保留建立時間、來源、釘選。覆寫前會依[歷史版本](#歷史版本)規則保存舊內容 |
+| `DELETE` | `/api/snapshots/:id` | — | `{"ok":true}`；如果它是待匯入，會一起清除；歷史版本也一起刪除 |
+| `GET` | `/api/snapshots/:id/versions` | — | `{"versions":[Version...]}`，由新到舊；存檔不存在 `404` |
+| `GET` | `/api/snapshots/:id/versions/:vid` | — | `{"version":Version,"data":Data}`；版本不存在 `404` |
+| `POST` | `/api/snapshots/:id/versions/:vid/restore` | `{"name"?}` | `201 {"snapshot":Meta}`，複製成一筆 `source=restore` 的新存檔；沒給名稱時用「原名稱（YYYY-MM-DD HH:MM UTC 版本）」 |
 | `GET` | `/api/pending` | — | `{"pending":Pending\|null}` |
 | `PUT` | `/api/pending` | `{"id"}` | `{"pending":Pending}`；存檔不存在回 `404` |
 | `DELETE` | `/api/pending` | — | `{"ok":true}` |
@@ -573,6 +597,21 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
 | `summary.slots[].p` | 方案編號（數字），或挑戰 `q:<代碼>` |
 | `summary.slots[].st` / `l` / `r` | 車站數 / 路線數 / 日運量 |
 
+### Version（歷史版本資訊）
+
+```json
+{
+  "vid": "0mw2nbg5q",
+  "at": 1793828742542,
+  "device": "Mac · Chrome",
+  "keyCount": 12,
+  "size": 48213,
+  "summary": { "city": null, "slots": [ { "c": "taipei", "p": 0, "st": 11, "l": 3, "r": 52000 } ] }
+}
+```
+
+`vid` 是 `at`（版本內容的時間，即被覆寫前的 `updatedAt`）的 base36，補零到 9 碼。`summary` 格式和 Meta 相同。
+
 ### Pending（待匯入）
 
 ```json
@@ -584,6 +623,7 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
 | R2 key | 內容 |
 |---|---|
 | `s/<id>` | Data JSON；metadata 存在 R2 自訂 metadata（`name`、`device`、`source`、`createdAt`、`updatedAt`、`pinned`=`'1'`/`'0'`、`keyCount`、`summary`） |
+| `v/<id>/<vid>` | 自動儲存 `<id>` 的歷史版本，內容是 Data JSON；`<vid>` 是版本時間（毫秒）的 base36，補零到 9 碼以便依字串排序；metadata 有 `device`、`keyCount`、`summary` |
 | `meta/pending` | Pending JSON |
 
 ---
@@ -628,11 +668,11 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
 | 服務 | 免費額度（以 Cloudflare 官方公告為準） | 本工具的用量 |
 |---|---|---|
 | Workers | 每天 100,000 次請求 | 開 `/play/` 時會轉接遊戲的每個資源。自動儲存在進度有變動時最多每 30 秒 1 次（每小時約 120 次） |
-| R2 儲存 | 10 GB / 月 | 每筆存檔通常幾十 KB |
-| R2 寫入（Class A） | 每月 100 萬次 | 每次儲存 1 次，列表 1 次 |
+| R2 儲存 | 10 GB / 月 | 每筆存檔通常幾十 KB；每筆自動儲存另有約 80 份歷史版本 |
+| R2 寫入（Class A） | 每月 100 萬次 | 每次儲存 1 次，列表 1 次；自動儲存覆寫時多 1 次列出歷史版本，最多每 15 分鐘多 1 次寫入版本 |
 | R2 讀取（Class B） | 每月 1,000 萬次 | |
 
-存檔不會自動清除。如果「匯入前備份」或歷史存檔太多，可以在管理介面刪除。
+存檔不會自動清除（歷史版本例外，依保留規則自動清理）。如果「匯入前備份」或舊存檔太多，可以在管理介面刪除。
 
 ---
 

@@ -52,6 +52,12 @@
   .tag.latest { background: #dafbe1; color: #116329; }
   .tag.pend { background: var(--warn-bg); color: var(--warn-fg); }
   .slots { margin: 4px 0 8px; font-size: 13px; color: var(--muted); }
+  .versions { margin-top: 10px; padding: 8px 12px; border-radius: 10px; background: var(--btn); }
+  .versions .ver { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; padding: 7px 0; border-top: 1px solid var(--line); }
+  .versions .ver:first-of-type { border-top: 0; }
+  .versions .ver .info { flex: 1; min-width: 200px; font-size: 13px; }
+  .versions .ver .info .muted { font-size: 12px; }
+  .versions button { font-size: 13px; padding: 5px 10px; background: var(--bg); }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; }
   .pending { background: var(--warn-bg); color: var(--warn-fg); border-radius: 12px; padding: 12px 14px; margin-bottom: 16px; }
   .section-label { font-size: 13px; font-weight: 600; color: var(--muted); margin: 14px 0 2px; }
@@ -232,13 +238,56 @@
   const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
   const fmtNum = (n) => n >= 10000 ? (n / 10000).toFixed(1) + ' 萬' : String(n);
   const slotLabel = (p) => typeof p === 'string' && p.startsWith('q:') ? '挑戰 ' + p.slice(2) : '方案 ' + p;
-  const sourceLabel = { manual: '手動儲存', 'auto-save': '自動儲存', 'auto-backup': '匯入前備份', upload: '檔案上傳' };
+  const sourceLabel = { manual: '手動儲存', 'auto-save': '自動儲存', 'auto-backup': '匯入前備份', upload: '檔案上傳', restore: '從歷史版本還原' };
+  const slotsText = (slots) => slots.map((x) => `${esc(x.c)}・${esc(slotLabel(x.p))}：${x.st} 站 / ${x.l} 線 / 日運量 ${fmtNum(x.r)}`).join('<br>');
+
+  function downloadJson(data, name, time) {
+    const blob = new Blob([JSON.stringify(data)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    const stamp = new Date(time).toISOString().slice(0, 16).replace(/[:T]/g, '-');
+    a.download = `metromaster-${(name || 'save').replace(/[\\/:*?"<>|]/g, '_')}-${stamp}.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }
+
+  // 自動儲存的歷史版本列表（展開在該筆存檔下方）
+  async function toggleVersions(item, s) {
+    const box = item.querySelector('.versions');
+    if (!box.classList.contains('hidden')) return box.classList.add('hidden');
+    box.classList.remove('hidden');
+    box.innerHTML = '<div class="muted">載入中…</div>';
+    const { versions } = await api('/api/snapshots/' + s.id + '/versions');
+    box.innerHTML = versions.length
+      ? `<div class="muted" style="margin-bottom:4px">每次自動儲存覆寫前都會保留舊版：2 小時內每 15 分鐘、24 小時內每小時、30 天內每天、180 天內每週各一份。還原會另存成一筆新存檔，不影響這筆自動儲存。</div>` +
+        versions.map((v) => `<div class="ver" data-vid="${esc(v.vid)}">
+          <div class="info">${fmtTime(v.at)}・${esc(v.device || '未知裝置')}・${fmtSize(v.size)}
+            <div class="muted">${v.summary?.slots?.length ? slotsText(v.summary.slots.slice(0, 3)) : v.keyCount + ' 個存檔項目'}</div></div>
+          <button data-vact="restore">還原成新存檔</button>
+          <button data-vact="download">下載</button>
+        </div>`).join('')
+      : '<div class="muted">還沒有歷史版本。自動儲存下一次更新這筆存檔時，就會保留目前的內容。</div>';
+  }
+
+  async function versionAction(btn) {
+    const item = btn.closest('.item');
+    const s = snapshots.find((x) => x.id === item.dataset.id);
+    const vid = btn.closest('.ver').dataset.vid;
+    if (btn.dataset.vact === 'restore') {
+      const at = parseInt(vid, 36); // 版本 id 就是時間戳（base36）
+      const name = `${s.name || '自動儲存'}（${fmtTime(at)} 版本）`;
+      await api(`/api/snapshots/${s.id}/versions/${vid}/restore`, { method: 'POST', body: JSON.stringify({ name }) });
+      await refresh();
+      toast('已還原成新存檔「' + name + '」');
+    } else {
+      const r = await api(`/api/snapshots/${s.id}/versions/${vid}`);
+      downloadJson(r.data, (s.name || 'save') + '-版本', r.version.at);
+    }
+  }
 
   function itemHtml(s, latest) {
     const slots = s.summary?.slots || [];
-    const slotsHtml = slots.length
-      ? slots.map((x) => `${esc(x.c)}・${esc(slotLabel(x.p))}：${x.st} 站 / ${x.l} 線 / 日運量 ${fmtNum(x.r)}`).join('<br>')
-      : `${s.keyCount} 個存檔項目`;
+    const slotsHtml = slots.length ? slotsText(slots) : `${s.keyCount} 個存檔項目`;
     return `<div class="item" data-id="${esc(s.id)}">
       <div class="head">
         <span class="name">${esc(s.name || '未命名存檔')}</span>
@@ -253,11 +302,13 @@
         <button class="primary" data-act="load-play">載入到我的網域版</button>
         <button data-act="import">匯入到原網站</button>
         <button data-act="download">下載</button>
+        ${s.source === 'auto-save' ? '<button data-act="versions">歷史版本</button>' : ''}
         <button data-act="unlock-all" title="把這筆存檔補成全解（ALL ACCESS）：計劃 4/5、自訂顏色、區間 3">解鎖全部</button>
         <button data-act="rename">改名</button>
         <button data-act="pin">${s.pinned ? '取消釘選' : '釘選'}</button>
         <button class="danger" data-act="delete">刪除</button>
       </div>
+      ${s.source === 'auto-save' ? '<div class="versions hidden"></div>' : ''}
     </div>`;
   }
 
@@ -433,6 +484,18 @@
       await api('/api/pending', { method: 'DELETE' }).catch(() => {});
       return refresh();
     }
+    const vbtn = e.target.closest('[data-vact]');
+    if (vbtn) {
+      vbtn.disabled = true;
+      try {
+        await versionAction(vbtn);
+      } catch (err) {
+        toast(err.message);
+      } finally {
+        vbtn.disabled = false;
+      }
+      return;
+    }
     const btn = e.target.closest('[data-act]');
     if (!btn) return;
     const id = btn.closest('.item').dataset.id;
@@ -459,15 +522,12 @@
         }
         case 'download': {
           const r = await api('/api/snapshots/' + id);
-          const blob = new Blob([JSON.stringify(r.data)], { type: 'application/json' });
-          const a = document.createElement('a');
-          a.href = URL.createObjectURL(blob);
-          const stamp = new Date(s.createdAt).toISOString().slice(0, 16).replace(/[:T]/g, '-');
-          a.download = `metromaster-${(s.name || 'save').replace(/[\\/:*?"<>|]/g, '_')}-${stamp}.json`;
-          a.click();
-          setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+          downloadJson(r.data, s.name, s.createdAt);
           break;
         }
+        case 'versions':
+          await toggleVersions(btn.closest('.item'), s);
+          break;
         case 'unlock-all': {
           // 把這筆雲端存檔補成全解：只改 unlocked 紀錄的 owned 欄位，其他內容保留
           const r = await api('/api/snapshots/' + id);
