@@ -83,14 +83,22 @@
 
 ### B. 原網站 + 書籤小工具
 
-1. 在管理介面登入後，到「原網站同步書籤」區塊：
+書籤有兩種：
+
+- **遊戲帳號版（預設）**：書籤不含登入資訊。點書籤時，它會讀取你在遊戲裡登入的帳號（Google／Apple），交給 Worker 驗證，換到本站的 token。所以書籤可以放心放在任何裝置。前提是先完成[設定遊戲帳號登入](#7-設定遊戲帳號登入選用)，並且在遊戲裡登入帳號。管理介面的登入頁就有這個書籤，還沒用密碼登入也能取得。
+- **內含登入資訊版**：在「原網站同步書籤」區塊勾選「書籤內含登入資訊」就會產生。書籤裡直接帶著一年有效的 token，不需要遊戲帳號。
+
+加入書籤的方法：
+
+1. 在管理介面登入後，到「原網站同步書籤」區塊（遊戲帳號版也可以在登入頁取得）：
    - **桌機**：把「🚇 存檔同步」按鈕拖到書籤列。
    - **iPhone / iPad Safari**：先把任意網頁加入書籤，按「複製書籤網址」，再到書籤管理把該書籤的網址改成剛剛複製的內容。
    - **Android Chrome**：同上，編輯書籤網址後，在網址列輸入書籤名稱，從建議清單點它執行。
 2. 到 `metromaster.huangyouci.com` 的遊戲頁面點書籤，就會開出同步面板（再點一次會關閉）。
 3. 面板功能和 `/play/` 相同，但沒有自動儲存。
+4. 用遊戲帳號版書籤時，按面板右上角的「管理介面」，就會帶著 token 開啟管理介面並自動登入。token 放在網址 `#` 後面，不會送到伺服器，管理頁讀到後會立刻從網址移除。
 
-書籤的內容長這樣，裡面帶有一年有效的登入 token，所以**不要分享給別人**：
+內含登入資訊版的書籤長這樣，裡面帶有一年有效的登入 token，所以**不要分享給別人**（遊戲帳號版只是少了 `token` 欄位）：
 
 ```js
 javascript:(function(){window.__MMS={"api":"https://<你的網域>","token":"<exp>.<sig>"};var s=document.createElement('script');s.src='https://<你的網域>/inject.js?t='+Date.now();document.body.appendChild(s);})();
@@ -256,7 +264,20 @@ npx wrangler secret put APP_PASSWORD
 
 secret 不會被之後的 `wrangler deploy` 覆蓋。還沒設定時，登入會回 `500 尚未設定 APP_PASSWORD`。
 
-### 7. 驗證
+### 7. 設定遊戲帳號登入（選用）
+
+遊戲網頁版用 Firebase Auth 登入（專案 `app-metromaster`，已寫在 `wrangler.jsonc` 的 `FIREBASE_PROJECT_ID`）。要讓遊戲帳號能登入本站，把允許的帳號設成 secret：
+
+```sh
+npx wrangler secret put ALLOWED_ACCOUNTS
+# 輸入 email 或 Firebase uid，多個用逗號分隔，例如：me@gmail.com
+```
+
+用 email 比對時，只接受 Google 已驗證的 email。Apple 登入若選了「隱藏我的電子郵件」，email 會是轉寄地址，這時改用 uid 比較穩定。不知道 uid 的話，先用遊戲帳號版書籤點一次，錯誤訊息會顯示這個帳號的 email 和 uid。
+
+這個 secret 放在 Cloudflare，不會進 Git，所以公開 repo 也不會洩漏你的 email。沒設定時，遊戲帳號登入一律回 `403`，密碼登入不受影響。
+
+### 8. 驗證
 
 1. 開 `https://<你的網域>/`，用密碼登入。
 2. 點「開始玩」，確認遊戲能正常載入、左上角有 🚇 按鈕。
@@ -317,6 +338,8 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | 名稱 | 類型 | 預設 / 範例 | 說明 |
 |---|---|---|---|
 | `APP_PASSWORD` | Secret（必填） | 無 | 登入密碼，也是 token 簽章的金鑰材料 |
+| `ALLOWED_ACCOUNTS` | Secret（選用） | 無 | 可以用遊戲帳號登入的 email 或 Firebase uid，逗號分隔、不分大小寫 |
+| `FIREBASE_PROJECT_ID` | 一般變數 | `app-metromaster` | 遊戲的 Firebase 專案 ID，用來驗證 ID token 的 `iss` 與 `aud` |
 | `GAME_ORIGIN` | 一般變數 | `https://metromaster.huangyouci.com` | 原遊戲網站的 origin。`/play/` 轉接到這裡；CORS 也允許這個 origin（給書籤用）。結尾不要加 `/`。 |
 | `SAVES` | R2 綁定 | bucket `metromastersync-saves` | 存檔儲存空間 |
 | `ASSETS` | 靜態資源綁定 | 目錄 `./public` | 管理介面與前端 script |
@@ -411,13 +434,14 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 
 ## API 文件
 
-除了 `/api/login` 和 `/api/logout`，都需要 `Authorization: Bearer <token>` 標頭。驗證失敗回 `401 {"error":"請重新登入"}`。
+除了 `/api/login`、`/api/login/game` 和 `/api/logout`，都需要 `Authorization: Bearer <token>` 標頭。驗證失敗回 `401 {"error":"請重新登入"}`。
 
 所有回應都是 JSON，帶 `Cache-Control: no-store`。錯誤格式為 `{"error":"訊息"}`。
 
 | 方法 | 路徑 | 請求內容 | 回應 |
 |---|---|---|---|
 | `POST` | `/api/login` | `{"password":"..."}` | `200 {"token","exp"}`，並設定 `mms_session` Cookie；密碼錯誤 `401 密碼錯誤` |
+| `POST` | `/api/login/game` | `{"idToken":"<遊戲的 Firebase ID token>"}` | `200 {"token","exp","account":{"uid","email","name"}}`，並設定 Cookie；token 無效或過期 `401`；帳號不在 `ALLOWED_ACCOUNTS` `403` |
 | `POST` | `/api/logout` | — | `200 {"ok":true}`，清除 Cookie |
 | `GET` | `/api/me` | — | `200 {"ok":true}`（檢查 token 是否有效） |
 | `POST` | `/api/session` | — | 用 Bearer token 換發 `mms_session` Cookie，到期時間與 token 相同 |
@@ -531,6 +555,8 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
 ## 安全性
 
 - **只有一組密碼**，沒有多使用者；所有登入的人看到同一份雲端存檔。適合個人使用。
+- 遊戲帳號登入：Worker 用 Google 公開金鑰（`securetoken@system.gserviceaccount.com` 的 JWKS）驗證 RS256 簽章，並檢查 `iss`、`aud`、`exp`、`iat`、`auth_time`，拒絕匿名帳號，最後比對 `ALLOWED_ACCOUNTS`。Firebase ID token 只用來換發本站 token，不會儲存。
+- 書籤在遊戲頁只會讀取 Firebase 的 IndexedDB，不會寫入。ID token 快過期時，會用 refresh token 向 Google 換一個新的，但不會寫回遊戲。這是依賴遊戲目前的實作，如果遊戲改了登入方式，就要改回密碼或內含登入資訊的書籤。
 - 密碼比對使用 HMAC 加上 `timingSafeEqual`，避免時序攻擊；密碼錯誤會延遲 800ms 才回應。沒有鎖定次數，所以請用夠長的隨機密碼。
 - token 格式 `<到期秒數>.<HMAC-SHA256 簽章 base64url>`，伺服器不儲存 session，改密碼就會讓所有 token 失效。
 - `/play/*` 用 HttpOnly + Secure + SameSite=Lax 的 Cookie 驗證，網頁上的 JavaScript 讀不到。

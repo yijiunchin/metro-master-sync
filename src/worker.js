@@ -60,6 +60,7 @@ async function route(request, env, url) {
   const method = request.method;
 
   if (pathname === '/api/login' && method === 'POST') return login(request, env);
+  if (pathname === '/api/login/game' && method === 'POST') return loginWithGame(request, env);
   if (pathname === '/api/logout' && method === 'POST') {
     return json({ ok: true }, 200, { 'Set-Cookie': sessionCookie('', 0) });
   }
@@ -141,10 +142,90 @@ async function login(request, env) {
     await new Promise((r) => setTimeout(r, 800));
     throw new HttpError(401, '密碼錯誤');
   }
+  return issueToken(env);
+}
+
+async function issueToken(env, extra = {}) {
   const exp = Math.floor(Date.now() / 1000) + TOKEN_TTL;
-  const sig = await crypto.subtle.sign('HMAC', key, enc.encode('token|' + exp));
+  const sig = await crypto.subtle.sign('HMAC', await hmacKey(env), new TextEncoder().encode('token|' + exp));
   const token = `${exp}.${b64url(sig)}`;
-  return json({ token, exp }, 200, { 'Set-Cookie': sessionCookie(token, TOKEN_TTL) });
+  return json({ token, exp, ...extra }, 200, { 'Set-Cookie': sessionCookie(token, TOKEN_TTL) });
+}
+
+// ---------- 遊戲帳號登入：驗證遊戲（Firebase Auth）發給玩家的 ID token ----------
+
+const JWKS_URL = 'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com';
+let jwksCache = { keys: null, until: 0 };
+
+async function firebaseKey(kid) {
+  const now = Date.now();
+  if (!jwksCache.keys || now > jwksCache.until || !jwksCache.keys[kid]) {
+    const res = await fetch(JWKS_URL, { cf: { cacheTtl: 3600 } });
+    if (!res.ok) throw new HttpError(502, '無法取得 Google 驗證金鑰');
+    const maxAge = Number((res.headers.get('Cache-Control') || '').match(/max-age=(\d+)/)?.[1]) || 3600;
+    const { keys } = await res.json();
+    jwksCache = { keys: Object.fromEntries(keys.map((k) => [k.kid, k])), until: now + maxAge * 1000 };
+  }
+  const jwk = jwksCache.keys[kid];
+  if (!jwk) return null;
+  return crypto.subtle.importKey('jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify']);
+}
+
+async function verifyFirebaseIdToken(env, idToken) {
+  const projectId = env.FIREBASE_PROJECT_ID;
+  if (!projectId) throw new HttpError(500, '尚未設定 FIREBASE_PROJECT_ID');
+  const bad = () => new HttpError(401, '遊戲登入資訊無效或已過期，請在遊戲頁重新整理後再試');
+  const parts = String(idToken || '').split('.');
+  if (parts.length !== 3) throw bad();
+  let header, payload;
+  try {
+    header = JSON.parse(new TextDecoder().decode(fromB64url(parts[0])));
+    payload = JSON.parse(new TextDecoder().decode(fromB64url(parts[1])));
+  } catch {
+    throw bad();
+  }
+  if (header.alg !== 'RS256' || !header.kid) throw bad();
+  const key = await firebaseKey(header.kid);
+  if (!key) throw bad();
+  const ok = await crypto.subtle.verify(
+    'RSASSA-PKCS1-v1_5',
+    key,
+    fromB64url(parts[2]),
+    new TextEncoder().encode(parts[0] + '.' + parts[1]),
+  );
+  const now = Math.floor(Date.now() / 1000);
+  const skew = 300;
+  if (
+    !ok ||
+    payload.iss !== 'https://securetoken.google.com/' + projectId ||
+    payload.aud !== projectId ||
+    typeof payload.sub !== 'string' ||
+    !payload.sub ||
+    !(payload.exp > now) ||
+    !(payload.iat <= now + skew) ||
+    !(payload.auth_time <= now + skew) ||
+    payload.firebase?.sign_in_provider === 'anonymous'
+  ) {
+    throw bad();
+  }
+  return payload;
+}
+
+async function loginWithGame(request, env) {
+  const { idToken } = await readJson(request);
+  const p = await verifyFirebaseIdToken(env, idToken);
+  const email = p.email_verified && typeof p.email === 'string' ? p.email.toLowerCase() : '';
+  const account = { uid: p.sub, email, name: typeof p.name === 'string' ? p.name : '' };
+  const allowed = String(env.ALLOWED_ACCOUNTS || '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (!allowed.includes(p.sub.toLowerCase()) && !(email && allowed.includes(email))) {
+    await new Promise((r) => setTimeout(r, 500));
+    const who = email ? `${email}（uid ${p.sub}）` : `uid ${p.sub}`;
+    throw new HttpError(403, `遊戲帳號 ${who} 沒有使用權限。請把它加進 Worker 的 ALLOWED_ACCOUNTS。`);
+  }
+  return issueToken(env, { account });
 }
 
 const COOKIE = 'mms_session';

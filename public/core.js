@@ -191,10 +191,92 @@
         headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: 'Bearer ' + token } : {}) },
       });
       const body = await res.json().catch(() => ({}));
-      if (res.status === 401 && path !== '/api/login') onUnauthorized?.();
+      if (res.status === 401 && !path.startsWith('/api/login')) onUnauthorized?.();
       if (!res.ok) throw new Error(body.error || 'HTTP ' + res.status);
       return body;
     };
+  }
+
+  // ---------- 遊戲帳號登入 ----------
+  // 遊戲網頁版用 Firebase Auth，登入狀態存在 IndexedDB firebaseLocalStorageDb。
+  // 只讀不寫：資料庫不存在時中止 upgrade，避免替遊戲建立空的資料庫。
+  const FB_DB = 'firebaseLocalStorageDb';
+  const FB_STORE = 'firebaseLocalStorage';
+  const FB_PREFIX = 'firebase:authUser:';
+
+  function readFirebaseRecords() {
+    return new Promise((resolve) => {
+      let req;
+      try {
+        req = indexedDB.open(FB_DB);
+      } catch {
+        return resolve([]);
+      }
+      req.onupgradeneeded = () => req.transaction.abort();
+      req.onerror = () => resolve([]);
+      req.onblocked = () => resolve([]);
+      req.onsuccess = () => {
+        const db = req.result;
+        try {
+          if (!db.objectStoreNames.contains(FB_STORE)) return resolve([]);
+          const all = db.transaction(FB_STORE, 'readonly').objectStore(FB_STORE).getAll();
+          all.onsuccess = () => resolve(all.result || []);
+          all.onerror = () => resolve([]);
+        } catch {
+          resolve([]);
+        } finally {
+          db.close();
+        }
+      };
+    });
+  }
+
+  async function gameUser() {
+    const found = [];
+    for (const r of await readFirebaseRecords()) {
+      if (String(r?.fbase_key).startsWith(FB_PREFIX) && r.value) found.push([r.fbase_key, r.value]);
+    }
+    // 舊版或不支援 IndexedDB 時，Firebase 會改用 localStorage
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k?.startsWith(FB_PREFIX)) found.push([k, JSON.parse(localStorage.getItem(k))]);
+      }
+    } catch {}
+    const hit = found.find(([, v]) => v?.stsTokenManager?.refreshToken);
+    if (!hit) return null;
+    const [key, user] = hit;
+    return { apiKey: key.slice(FB_PREFIX.length).split(':')[0], user };
+  }
+
+  // 取得目前遊戲帳號的 ID token；快過期時用 refresh token 向 Google 換新的（不寫回遊戲）
+  async function gameIdToken() {
+    const g = await gameUser();
+    if (!g) return null;
+    const stm = g.user.stsTokenManager;
+    if (stm.accessToken && Number(stm.expirationTime) > Date.now() + 60 * 1000) return stm.accessToken;
+    const res = await fetch('https://securetoken.googleapis.com/v1/token?key=' + encodeURIComponent(g.apiKey), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: 'grant_type=refresh_token&refresh_token=' + encodeURIComponent(stm.refreshToken),
+    });
+    if (!res.ok) throw new Error('遊戲登入已失效，請在遊戲裡重新登入');
+    return (await res.json()).id_token;
+  }
+
+  // 用遊戲帳號換發本站 token，成功時存到本機並回傳 token
+  async function loginWithGame(base) {
+    const idToken = await gameIdToken();
+    if (!idToken) throw new Error('遊戲還沒登入。請先在遊戲的設定裡用 Google 或 Apple 登入帳號。');
+    const res = await fetch(base + '/api/login/game', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ idToken }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || 'HTTP ' + res.status);
+    set(TOKEN_KEY, body.token);
+    return body.token;
   }
 
   window.MMSCore = {
@@ -222,5 +304,7 @@
     device,
     storedToken,
     createApi,
+    gameUser,
+    loginWithGame,
   };
 })();

@@ -32,6 +32,8 @@
   .hidden { display: none !important; }
   #login { max-width: 360px; margin: 12vh auto 0; }
   #login form { display: flex; flex-direction: column; gap: 10px; }
+  #login .or { text-align: center; margin: 18px 0 6px; }
+  #login .steps { padding-left: 20px; margin: 6px 0 12px; line-height: 1.6; }
   .bm { display: inline-block; padding: 9px 16px; border-radius: 999px; background: var(--accent); color: var(--accent-fg); text-decoration: none; font-weight: 600; cursor: grab; }
   details summary { cursor: pointer; font-weight: 600; }
   details ol { padding-left: 20px; margin: 8px 0; }
@@ -65,6 +67,17 @@
       <button class="primary" type="submit">登入</button>
       <div id="login-err" class="err"></div>
     </form>
+    <div class="or muted">或</div>
+    <h2>用遊戲帳號登入</h2>
+    <ol class="muted steps">
+      <li>在 <a href="https://metromaster.huangyouci.com/" target="_blank" rel="noopener">遊戲網站</a> 的設定裡用 Google 或 Apple 登入帳號。</li>
+      <li>把下面的書籤加到瀏覽器（電腦可直接拖到書籤列）。</li>
+      <li>在遊戲頁面點書籤，打開同步面板，再按面板右上角的「管理介面」就會自動登入這裡。</li>
+    </ol>
+    <div class="row">
+      <a class="bm" data-bm="game" href="#">🚇 存檔同步</a>
+      <button data-copy-bm="game">複製書籤網址</button>
+    </div>
   </section>
 
   <section id="app" class="hidden">
@@ -89,9 +102,10 @@
       <h2>原網站同步書籤</h2>
       <p class="muted" style="margin-top:0">在原網站 <a href="https://metromaster.huangyouci.com/" target="_blank" rel="noopener">metromaster.huangyouci.com</a> 玩的話，遊戲把進度存在它自己網站的瀏覽器空間裡，所以要在遊戲頁面上點這個書籤，打開同步面板來<b>儲存目前進度</b>或<b>載入雲端存檔</b>。每台裝置、每個瀏覽器都要設定一次。</p>
       <div class="row" style="margin-bottom:10px">
-        <a class="bm" id="bookmarklet" href="#">🚇 存檔同步</a>
-        <button id="copy-bm">複製書籤網址</button>
+        <a class="bm" id="bookmarklet" data-bm="auto" href="#">🚇 存檔同步</a>
+        <button data-copy-bm="auto">複製書籤網址</button>
       </div>
+      <label class="muted" style="display:block;margin-bottom:10px"><input type="checkbox" id="bm-embed" /> 書籤內含登入資訊（不使用遊戲帳號登入）</label>
       <details>
         <summary>如何加入書籤</summary>
         <p><b>電腦（Chrome / Edge / Firefox / Safari）</b></p>
@@ -113,7 +127,7 @@
           <li>把這個頁面加入書籤（⋮ → ☆），再到書籤管理編輯它：名稱填「存檔同步」，網址貼上剛剛複製的內容。</li>
           <li>到遊戲頁面，<b>在網址列輸入「存檔同步」</b>，點選下拉選單中的書籤（直接從書籤列表點不會執行）。</li>
         </ol>
-        <p class="muted">※ 書籤內含登入憑證，一年有效，請勿分享。修改密碼後舊書籤會失效，需要重新設定。<br>※ 若把遊戲「加入主畫面」以 App 模式開啟，沒有書籤可以點，請改用瀏覽器開啟遊戲。</p>
+        <p class="muted">※ 預設的書籤不含登入資訊，會用你在遊戲裡登入的帳號（Google／Apple）驗證，可以安心放在任何裝置。<br>※ 勾選「書籤內含登入資訊」時，書籤一年有效，請勿分享；修改密碼後舊書籤會失效，需要重新設定。<br>※ 若把遊戲「加入主畫面」以 App 模式開啟，沒有書籤可以點，請改用瀏覽器開啟遊戲。</p>
       </details>
     </div>
 
@@ -143,6 +157,12 @@
     get: () => { try { return localStorage.getItem(TOKEN_KEY); } catch { return null; } },
     set: (v) => { try { v ? localStorage.setItem(TOKEN_KEY, v) : localStorage.removeItem(TOKEN_KEY); } catch {} },
   };
+  // 從遊戲面板的「管理介面」連結帶過來的 token
+  const hashToken = new URLSearchParams(location.hash.slice(1)).get('token');
+  if (hashToken) {
+    store.set(hashToken);
+    history.replaceState(null, '', location.pathname + location.search);
+  }
   let token = store.get();
   let snapshots = [];
   let pending = null;
@@ -178,8 +198,9 @@
     show('login');
   }
 
-  function bookmarkletCode() {
-    const cfg = JSON.stringify({ api: location.origin, token });
+  // embed=true：書籤內含 token；否則在遊戲頁用遊戲帳號登入
+  function bookmarkletCode(embed) {
+    const cfg = JSON.stringify(embed && token ? { api: location.origin, token } : { api: location.origin });
     return `javascript:(function(){window.__MMS=${cfg};var s=document.createElement('script');s.src='${location.origin}/inject.js?t='+Date.now();document.body.appendChild(s);})();`;
   }
 
@@ -263,7 +284,7 @@
       return;
     }
     show('app');
-    $('#bookmarklet').href = bookmarkletCode();
+    renderBookmarklets();
     renderPlayState();
     await refresh();
   }
@@ -340,10 +361,18 @@
   $('#logout').addEventListener('click', logout);
   $('#reload').addEventListener('click', refresh);
   $('#show-auto').addEventListener('change', render);
-  $('#bookmarklet').addEventListener('click', (e) => { e.preventDefault(); toast('請把這個按鈕拖到書籤列，或用「複製書籤網址」'); });
+  const bmEmbed = (kind) => kind === 'auto' && $('#bm-embed').checked;
+  function renderBookmarklets() {
+    for (const a of document.querySelectorAll('[data-bm]')) a.href = bookmarkletCode(bmEmbed(a.dataset.bm));
+  }
+  renderBookmarklets();
+  $('#bm-embed').addEventListener('change', renderBookmarklets);
+  for (const a of document.querySelectorAll('[data-bm]')) {
+    a.addEventListener('click', (e) => { e.preventDefault(); toast('請把這個按鈕拖到書籤列，或用「複製書籤網址」'); });
+  }
 
-  $('#copy-bm').addEventListener('click', async () => {
-    const code = bookmarkletCode();
+  document.querySelectorAll('[data-copy-bm]').forEach((b) => b.addEventListener('click', async () => {
+    const code = bookmarkletCode(bmEmbed(b.dataset.copyBm));
     try {
       await navigator.clipboard.writeText(code);
     } catch {
@@ -355,7 +384,7 @@
       ta.remove();
     }
     toast('已複製書籤網址');
-  });
+  }));
 
   $('#upload-btn').addEventListener('click', () => $('#upload').click());
   $('#upload').addEventListener('change', async (e) => {

@@ -27,11 +27,12 @@
     const getToken = () => cfg.token || C.storedToken();
 
     if (!onPlay) {
-      if (!getToken()) {
-        alert('書籤缺少登入資訊，請到 ' + API + ' 登入後重新建立書籤。');
-        return;
-      }
-      togglePanel(C, getToken, null);
+      if (getToken() || document.getElementById('mms-host')) return togglePanel(C, getToken, null);
+      // 書籤沒有內建 token：用遊戲帳號登入換發
+      C.loginWithGame(API).then(
+        () => togglePanel(C, getToken, null),
+        (err) => alert('無法用遊戲帳號登入：' + err.message + '\n\n也可以到 ' + API + ' 用密碼登入後，建立內含登入資訊的書籤。'),
+      );
       return;
     }
 
@@ -168,7 +169,10 @@
       existing.remove();
       return;
     }
-    const api = C.createApi(API, getToken);
+    // 遊戲帳號換發的 token 失效時清掉，下次點書籤會重新登入
+    const api = C.createApi(API, getToken, () => !cfg.token && !onPlay && C.set(C.TOKEN_KEY, null));
+    // 開管理介面時帶上 token（放在 # 後面，不會送到伺服器），管理頁讀取後會立刻從網址移除
+    const manageUrl = API + '/' + (onPlay || !getToken() ? '' : '#token=' + encodeURIComponent(getToken()));
 
     const host = document.createElement('div');
     host.id = 'mms-host';
@@ -210,7 +214,7 @@
 </style>
 <div class="backdrop"></div>
 <div class="panel" role="dialog" aria-label="Metro Master Sync">
-  <header><b>🚇 存檔同步</b><a href="${API}/" target="_blank" rel="noopener">管理介面</a><button class="x" data-act="close" aria-label="關閉">✕</button></header>
+  <header><b>🚇 存檔同步</b><a href="${manageUrl}" target="_blank" rel="noopener">管理介面</a><button class="x" data-act="close" aria-label="關閉">✕</button></header>
   <div class="body">
     <div class="save">
       <input id="name" placeholder="存檔名稱（可留空）" maxlength="80" />
