@@ -36,14 +36,14 @@
 
 遊戲把進度存在**它自己網域**的 `localStorage`，key 都以 `transit-planner:` 開頭（大多是 `transit-planner:v4:*`）。瀏覽器的同源政策不允許其他網站讀取這些資料，所以這個工具提供兩種方式把資料拿出來：
 
-| | A. 我的網域版 `/play/` | B. 原網站 + 書籤小工具 |
+| | A. 我的網域版 `/play/` | B. 原網站 + userscript 或書籤 |
 |---|---|---|
 | 遊戲網址 | `https://<你的網域>/play/` | `https://metromaster.huangyouci.com/` |
-| 怎麼載入同步程式 | Worker 轉接原遊戲時直接把程式插入頁面 | 在遊戲頁點一下書籤 |
-| 要不要設定書籤 | 不用 | 每台裝置、每個瀏覽器設一次 |
-| 自動儲存 | 有（預設開啟） | 有（預設開啟）；每次開啟或重新整理遊戲後，要先點一次書籤才會啟動 |
+| 怎麼載入同步程式 | Worker 轉接原遊戲時直接把程式插入頁面 | userscript 每次開遊戲自動載入；或在遊戲頁點一下書籤 |
+| 要設定什麼 | 不用 | 每台裝置、每個瀏覽器裝一次 userscript 或加一次書籤 |
+| 自動儲存 | 有（預設開啟） | 有（預設開啟）；userscript 開遊戲就啟動，書籤要每次點一下才啟動 |
 | 遊戲內 Google／Apple 登入（排行榜等） | 不能用（遊戲的 Firebase 只允許原網站） | 可以 |
-| 管理介面一鍵載入 | 有 | 要先設成「待匯入」，再到遊戲頁點書籤 |
+| 管理介面一鍵載入 | 有 | 要先設成「待匯入」，再到遊戲頁打開 🚇 面板 |
 | 跳過推廣廣告倒數 | 有 | 沒有 |
 | 進度存放位置 | 你的網域的 localStorage | 原網站的 localStorage |
 
@@ -57,6 +57,7 @@
 瀏覽器 ──► Cloudflare Worker（src/worker.js）
             ├─ /api/*   → 存檔 API（R2：SAVES）
             ├─ /play/*  → 轉接 GAME_ORIGIN，插入 core.js + inject.js
+            ├─ /mms.user.js → 產生原網站用的 userscript（載入 inject.js?mode=auto）
             └─ 其他     → 靜態檔案（public/：管理介面、core.js、inject.js）
 ```
 
@@ -82,16 +83,35 @@
 - 遊戲頁的回應會加上 `Cache-Control: no-store` 和 `X-Robots-Tag: noindex, nofollow`，並移除上游的 `set-cookie`、`content-security-policy`、`report-to`、`nel`、`alt-svc` 標頭。
 - 只轉接 `GET` / `HEAD`，其他方法回 `405`。
 
-### B. 原網站 + 書籤小工具
+### B. 原網站 + userscript 或書籤
 
-書籤有兩種：
+#### userscript（推薦）
+
+裝好之後，每次打開原網站的遊戲，左上角就會自動出現 🚇 按鈕，自動儲存也會跟著啟動，不用每次點書籤。用法和 `/play/` 相同，但保有原網站的帳號功能（登入、排行榜、帳號名稱、遊戲內建雲端同步）。
+
+1. 先安裝 userscript 管理器：
+   - **電腦 Chrome／Edge／Firefox**：Tampermonkey 或 Violentmonkey。Chrome／Edge 要在擴充功能的設定裡開啟「允許使用者指令碼」（或開發人員模式）。
+   - **Mac／iPhone／iPad Safari**：App Store 的「Userscripts」（免費）。到 Safari 設定 → 延伸功能啟用它，並允許它在 `metromaster.huangyouci.com` 執行。
+   - **Android**：Firefox 加上 Violentmonkey（Android 版 Chrome 不支援擴充功能）。
+2. 打開 `https://<你的網域>/mms.user.js`（管理介面「原網站同步」區塊有「安裝 userscript」按鈕），管理器會跳出安裝畫面。Safari 的 Userscripts 要點網址列的 Userscripts 圖示，再按安裝。
+3. 在遊戲的設定裡用 Google 或 Apple 登入帳號（只需一次），然後重新整理遊戲。
+
+登入方式和遊戲帳號版書籤相同：讀取遊戲的登入狀態，交給 Worker 驗證後換發本站 token，存在原網站的 `localStorage['mms:token']`。所以要先完成[設定遊戲帳號登入](#7-設定遊戲帳號登入選用)。還沒連上時（遊戲沒登入，或帳號不在 `ALLOWED_ACCOUNTS`）🚇 按鈕會呈半透明，滑鼠移上去會顯示原因，點按鈕會再試一次並跳出錯誤訊息。token 失效時會自動清掉，下次再用遊戲帳號重新換發。
+
+userscript 本身只有十幾行：它在頁面插入 `<script src="https://<你的網域>/inject.js?mode=auto">`，同步程式每次都從你的網域載入最新版，所以更新功能不用重裝 userscript。腳本裡不含任何登入資訊，網址也是 Worker 依照目前網域產生的。
+
+同時裝了 userscript 又點書籤也沒關係，書籤只會開關面板，不會重複啟動自動儲存。
+
+#### 書籤
+
+不能裝 userscript 的瀏覽器用這個。書籤有兩種：
 
 - **遊戲帳號版（預設）**：書籤不含登入資訊。點書籤時，它會讀取你在遊戲裡登入的帳號（Google／Apple），交給 Worker 驗證，換到本站的 token。所以書籤可以放心放在任何裝置。前提是先完成[設定遊戲帳號登入](#7-設定遊戲帳號登入選用)，並且在遊戲裡登入帳號。管理介面的登入頁就有這個書籤，還沒用密碼登入也能取得。
-- **內含登入資訊版**：在「原網站同步書籤」區塊勾選「書籤內含登入資訊」就會產生。書籤裡直接帶著一年有效的 token，不需要遊戲帳號。
+- **內含登入資訊版**：在「原網站同步」區塊勾選「書籤內含登入資訊」就會產生。書籤裡直接帶著一年有效的 token，不需要遊戲帳號。
 
 加入書籤的方法：
 
-1. 在管理介面登入後，到「原網站同步書籤」區塊（遊戲帳號版也可以在登入頁取得）：
+1. 在管理介面登入後，到「原網站同步」區塊（遊戲帳號版也可以在登入頁取得）：
    - **桌機**：把「🚇 存檔同步」按鈕拖到書籤列。
    - **iPhone / iPad Safari**：先把任意網頁加入書籤，按「複製書籤網址」，再到書籤管理把該書籤的網址改成剛剛複製的內容。
    - **Android Chrome**：同上，編輯書籤網址後，在網址列輸入書籤名稱，從建議清單點它執行。
@@ -128,7 +148,7 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 |---|---|
 | 登入 | 輸入密碼。登入後 token 存在 `localStorage['mms:token']`，同時設定 `/play/` 用的 HttpOnly Cookie。網址帶 `?next=play` 時，登入後自動跳到 `/play/`。 |
 | 我的網域版遊戲 | 「開始玩」→ `/play/`。「儲存目前進度」→ 把 `/play/` 的進度存到雲端，名稱預設為目前存檔名。旁邊顯示「本機有進度：名稱（KB）」。 |
-| 原網站同步書籤 | 拖曳或複製書籤網址，附各平台設定說明。 |
+| 原網站同步 | 「安裝 userscript」按鈕與各平台安裝說明；書籤（拖曳或複製書籤網址，可選是否內含登入資訊），附各平台設定說明。 |
 | 待匯入 | 有待匯入存檔時顯示，可開啟遊戲或取消。 |
 | 雲端存檔 | 分成「釘選」「最近存檔」「歷史存檔」三區，依最後更新時間排序，最新的一筆標「最新」。 |
 
@@ -376,6 +396,7 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | `GAME_KEY_PREFIX` | `transit-planner:` | 存檔中每個 key 都必須以此開頭 |
 | `TOKEN_TTL` | `365 * 24 * 3600` 秒（1 年） | 登入 token 與 Cookie 有效期 |
 | `MAX_BODY` | `20 * 1024 * 1024`（20 MB） | 請求 `Content-Length` 上限，超過回 `413 存檔太大` |
+| `USERSCRIPT_VERSION` | `1.0.0` | userscript 的 `@version`；只有 userscript 本身內容改變時才需要調高，讓管理器提示更新 |
 | 密碼錯誤延遲 | 800 ms | 減緩暴力猜密碼 |
 | HMAC 金鑰 | `'mms1|' + APP_PASSWORD`，SHA-256 | token 簽章 |
 | Cookie 名稱 | `mms_session` | `/play/*` 的登入驗證 |
@@ -413,7 +434,9 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 
 | 數值 | 值 | 用途 |
 |---|---|---|
-| `GAME_HOST` | `metromaster.huangyouci.com` | 書籤只在這個網域或 `/play/` 啟動，其他網站會提示前往遊戲 |
+| `GAME_HOST` | `metromaster.huangyouci.com` | 書籤只在這個網域或 `/play/` 啟動，其他網站會提示前往遊戲；userscript 模式在其他網站直接不動作 |
+| 啟動模式 | `/play/`、`inject.js?mode=auto`（userscript）為常駐模式；其他為書籤模式 | 常駐模式有 🚇 按鈕、自動儲存，並在其他分頁匯入後重新載入；書籤模式點一下開關面板 |
+| 未連上時的 🚇 按鈕 | `opacity: .55` | 原網站常駐模式還沒換到 token 時 |
 | 自動儲存間隔 `INTERVAL` | 30,000 ms | |
 | 自動儲存開關 key | `mms:autosave-on` | |
 | 上次自動儲存時間 key | `mms:autosave-last` | |
@@ -455,6 +478,7 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | `GET` | `/api/pending` | — | `{"pending":Pending\|null}` |
 | `PUT` | `/api/pending` | `{"id"}` | `{"pending":Pending}`；存檔不存在回 `404` |
 | `DELETE` | `/api/pending` | — | `{"ok":true}` |
+| `GET` | `/mms.user.js` | — | 原網站用的 userscript，`@match` 原遊戲網址，載入 `<本站>/inject.js?mode=auto`；`Cache-Control: no-cache` |
 | `GET`/`HEAD` | `/play`、`/play/*` | Cookie `mms_session` | 轉接 `GAME_ORIGIN`。`/play` 會 `301` 到 `/play/`；未登入 `302` 到 `/?next=play` |
 
 其他錯誤碼：`400`（JSON 格式錯誤、存檔格式錯誤、空存檔、key 不合法）、`404`（找不到存檔／API）、`413`（超過 20MB）、`500`（未設定密碼或伺服器錯誤）。
@@ -619,7 +643,8 @@ npm run dev                                # wrangler dev，預設 http://localh
 ## 已知限制
 
 - 兩台裝置**同時**開著同一筆自動儲存在玩，會互相覆蓋，雲端留下最後上傳的那份。換裝置前先關掉另一台的遊戲。
-- 原網站的自動儲存要先點一次書籤才會啟動，重新整理或重新開啟遊戲後要再點一次。
+- 原網站用書籤時，自動儲存要先點一次書籤才會啟動，重新整理或重新開啟遊戲後要再點一次；用 userscript 就沒有這個限制。
+- userscript 需要瀏覽器支援擴充功能。Android 版 Chrome 不行，請改用 Firefox；把遊戲「加入主畫面」以 App 模式開啟時，userscript 和書籤都不會執行。
 - `/play/` 不能使用遊戲帳號相關功能：Google／Apple 登入、排行榜、自訂帳號名稱、帳號買斷，以及遊戲內建的雲端同步。遊戲的 Firebase 只允許原網站登入，API 金鑰也限制了來源網域，帳號後端還有 App Check（reCAPTCHA Enterprise）。要用這些功能請在原網站玩。
 - 看廣告逐項取得的解鎖存在 `transit-planner:v4:unlock`，會跟著存檔同步到 `/play/`；帳號買斷的解鎖不會。
 - 遊戲帳號登入依賴遊戲目前把 Firebase 登入狀態存在 IndexedDB `firebaseLocalStorageDb` 的做法，遊戲改版時可能失效，屆時改用密碼或內含登入資訊的書籤。
@@ -637,7 +662,7 @@ metro-master-sync/
 ├─ wrangler.jsonc               # Worker 設定：網域、R2、靜態檔、環境變數
 ├─ package.json                 # 只有 wrangler 一個開發依賴
 ├─ src/
-│  └─ worker.js                 # API、認證、/play/ 轉接與注入
+│  └─ worker.js                 # API、認證、/play/ 轉接與注入、產生 userscript
 ├─ public/                      # 靜態檔（ASSETS）
 │  ├─ index.html                # 管理介面
 │  ├─ core.js                   # 共用：讀寫 localStorage、凍結寫入、雜湊、API client

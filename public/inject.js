@@ -1,12 +1,20 @@
 // 遊戲頁上的存檔同步面板。
-// - 原網站：由書籤小工具注入，每點一次開／關面板。
+// - 原網站 + 書籤：每點一次開／關面板。
+// - 原網站 + userscript（inject.js?mode=auto）：每次開遊戲自動載入，顯示浮動按鈕並自動儲存。
 // - /play/ 我的網域版：由 worker 直接插入頁面，顯示浮動按鈕。
 (() => {
-  const SELF = new URL(document.currentScript?.src || location.href).origin;
+  const SCRIPT_URL = new URL(document.currentScript?.src || location.href);
+  const SELF = SCRIPT_URL.origin;
   const cfg = window.__MMS || {};
   const API = cfg.api || SELF;
   const GAME_HOST = 'metromaster.huangyouci.com';
   const onPlay = location.origin === SELF && location.pathname.startsWith('/play/');
+  // 由 userscript 載入：在原網站也像 /play/ 一樣常駐
+  const viaUserscript = !onPlay && SCRIPT_URL.searchParams.get('mode') === 'auto';
+  // 常駐模式：有浮動按鈕、自動儲存，並配合其他分頁的匯入
+  const resident = onPlay || viaUserscript;
+
+  if (viaUserscript && location.hostname !== GAME_HOST) return;
 
   if (location.hostname !== GAME_HOST && !onPlay) {
     if (confirm('請在「捷運規劃大師」遊戲頁面使用這個書籤。\n要前往遊戲網站嗎？')) location.href = 'https://' + GAME_HOST + '/';
@@ -26,11 +34,11 @@
     const C = window.MMSCore;
     const getToken = () => cfg.token || C.storedToken();
 
-    if (!onPlay) {
+    if (!resident) {
       // 第一次點書籤後就在這個分頁啟動自動儲存（重新整理頁面後要再點一次書籤）
       const open = () => {
         if (!window.__MMS_AUTO__) {
-          window.__MMS_AUTO__ = createAutoSave(C, getToken);
+          window.__MMS_AUTO__ = createAutoSave(C, getToken, () => !cfg.token && C.set(C.TOKEN_KEY, null));
           window.__MMS_AUTO__.run();
         }
         togglePanel(C, getToken, window.__MMS_AUTO__);
@@ -44,9 +52,24 @@
       return;
     }
 
-    // ----- /play/ 我的網域版 -----
+    // ----- 常駐模式：/play/ 我的網域版，或原網站 + userscript -----
     if (window.__MMS_PLAY__) return;
     window.__MMS_PLAY__ = true;
+
+    // 原網站沒有本站的登入 Cookie，用遊戲帳號換發 token（失敗時等使用者按 🚇 再試）
+    let loginError = null;
+    const ensureLogin = async () => {
+      if (onPlay || getToken()) return true;
+      try {
+        await C.loginWithGame(API);
+        loginError = null;
+        auto.run();
+        return true;
+      } catch (err) {
+        loginError = err.message;
+        return false;
+      }
+    };
 
     // 管理介面或其他分頁匯入存檔時，配合暫停寫入並重新載入
     C.channel?.addEventListener('message', (e) => {
@@ -67,7 +90,10 @@
     window.addEventListener('storage', (e) => e.key === C.IMPORT_MARK && checkImported());
     document.addEventListener('visibilitychange', () => !document.hidden && checkImported(), true);
 
-    const auto = createAutoSave(C, getToken);
+    // 原網站：token 失效時清掉，下次用遊戲帳號重新換發
+    const dropToken = () => !onPlay && !cfg.token && C.set(C.TOKEN_KEY, null);
+    const auto = createAutoSave(C, getToken, dropToken);
+    window.__MMS_AUTO__ = auto;
 
     const addFab = () => {
       const fab = document.createElement('button');
@@ -80,11 +106,25 @@
         'position:fixed;z-index:2147483646;left:12px;top:calc(env(safe-area-inset-top) + 64px);width:40px;height:40px;' +
         'border-radius:50%;border:0;background:rgba(255,255,255,.92);box-shadow:0 2px 10px rgba(0,0,0,.25);font-size:20px;' +
         'line-height:40px;padding:0;cursor:pointer;touch-action:manipulation;';
-      fab.addEventListener('click', (e) => {
+      fab.addEventListener('click', async (e) => {
         e.stopPropagation();
+        if (!document.getElementById('mms-host')) {
+          const ok = await ensureLogin();
+          mark();
+          if (!ok) return alert('無法用遊戲帳號登入：' + loginError);
+        }
         togglePanel(C, getToken, auto);
       });
       document.body.appendChild(fab);
+      // 還沒登入時按鈕半透明，提示需要先在遊戲裡登入帳號
+      const mark = () => {
+        const ok = onPlay || !!getToken();
+        fab.style.opacity = ok ? '1' : '.55';
+        fab.title = ok ? '存檔同步' : '存檔同步（尚未登入：' + (loginError || '請在遊戲裡登入帳號') + '）';
+      };
+      mark();
+      ensureLogin().then(mark);
+      document.addEventListener('visibilitychange', () => !document.hidden && !getToken() && ensureLogin().then(mark));
     };
     // 手機開啟時的「下載 App」對話框：自動選「在網頁玩」
     const skipGetApp = () => {
@@ -94,7 +134,7 @@
     };
     const onBody = () => {
       addFab();
-      skipGetApp();
+      if (onPlay) skipGetApp();
     };
     if (document.body) onBody();
     else document.addEventListener('DOMContentLoaded', onBody);
@@ -102,11 +142,11 @@
 
   // 自動儲存：進度有變動時定期上傳，切到背景時也存一次。
   // 一直更新同一筆 source=auto-save 的雲端存檔，不會每次新增。
-  function createAutoSave(C, getToken) {
+  function createAutoSave(C, getToken, onUnauthorized) {
     const ON_KEY = 'mms:autosave-on';
     const LAST_KEY = 'mms:autosave-last';
     const INTERVAL = 30 * 1000;
-    const api = C.createApi(API, getToken);
+    const api = C.createApi(API, getToken, onUnauthorized);
     const listeners = new Set();
     let running = null;
 
@@ -315,18 +355,17 @@
       if (pending?.id === id) await api('/api/pending', { method: 'DELETE' }).catch(() => {});
       setStatus('寫入中，即將重新載入遊戲…');
       C.freezeWrites();
-      if (onPlay) {
-        C.broadcast('freeze');
-        await C.sleep(150);
-      }
+      // 通知同網域其他開著遊戲的分頁（/play/ 或 userscript 常駐的原網站分頁）
+      C.broadcast('freeze');
+      await C.sleep(150);
       try {
         C.writeLocal(data, snapshot);
       } catch (err) {
         C.unfreezeWrites();
-        if (onPlay) C.broadcast('unfreeze');
+        C.broadcast('unfreeze');
         throw err;
       }
-      if (onPlay) C.broadcast('reload');
+      C.broadcast('reload');
       location.reload();
     }
 

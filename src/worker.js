@@ -9,6 +9,7 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname === '/play' || url.pathname.startsWith('/play/')) return proxyGame(request, env, url);
+    if (url.pathname === '/mms.user.js') return userscript(url);
     if (!url.pathname.startsWith('/api/')) return env.ASSETS.fetch(request);
 
     const cors = corsHeaders(request, env);
@@ -252,6 +253,42 @@ async function requireAuth(request, env) {
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
   if (!(await verifyToken(env, token))) throw new HttpError(401, '請重新登入');
   return token;
+}
+
+// ---------- userscript：在原網站每次開遊戲時自動載入 inject.js ----------
+
+const USERSCRIPT_VERSION = '1.0.0';
+
+function userscript(url) {
+  const origin = url.origin;
+  const game = 'https://metromaster.huangyouci.com';
+  const body = `// ==UserScript==
+// @name         Metro Master Sync
+// @namespace    ${origin}
+// @version      ${USERSCRIPT_VERSION}
+// @description  在捷運規劃大師原網站自動載入存檔同步：🚇 按鈕、自動儲存、雲端存檔
+// @match        ${game}/*
+// @run-at       document-idle
+// @grant        none
+// @noframes
+// @homepageURL  ${origin}/
+// @downloadURL  ${origin}/mms.user.js
+// @updateURL    ${origin}/mms.user.js
+// ==/UserScript==
+
+// 同步程式本體每次都從 ${origin} 載入最新版，這個腳本本身很少需要更新。
+// 用 <script> 標籤載入，讓程式在頁面環境執行（各家 userscript 管理器的執行環境不同）。
+(function () {
+  if (document.querySelector('script[data-mms-userscript]')) return;
+  var s = document.createElement('script');
+  s.src = '${origin}/inject.js?mode=auto&t=' + Date.now();
+  s.dataset.mmsUserscript = '1';
+  (document.head || document.documentElement).appendChild(s);
+})();
+`;
+  return new Response(body, {
+    headers: { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' },
+  });
 }
 
 // ---------- /play/：透過本網域執行遊戲 ----------

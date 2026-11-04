@@ -19,6 +19,7 @@
   main { max-width: 760px; margin: 0 auto; padding: 24px 16px 60px; }
   h1 { font-size: 22px; margin: 0; }
   h2 { font-size: 16px; margin: 0 0 10px; }
+  h3 { font-size: 14px; margin: 14px 0 6px; }
   .top { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; }
   .top h1 { flex: 1; }
   .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 16px; }
@@ -99,8 +100,31 @@
     <div id="pending-box"></div>
 
     <div class="card">
-      <h2>原網站同步書籤</h2>
-      <p class="muted" style="margin-top:0">在原網站 <a href="https://metromaster.huangyouci.com/" target="_blank" rel="noopener">metromaster.huangyouci.com</a> 玩的話，遊戲把進度存在它自己網站的瀏覽器空間裡，所以要在遊戲頁面上點這個書籤，打開同步面板來<b>儲存目前進度</b>或<b>載入雲端存檔</b>。每台裝置、每個瀏覽器都要設定一次。</p>
+      <h2>原網站同步</h2>
+      <p class="muted" style="margin-top:0">在原網站 <a href="https://metromaster.huangyouci.com/" target="_blank" rel="noopener">metromaster.huangyouci.com</a> 玩的話，遊戲把進度存在它自己網站的瀏覽器空間裡，要在遊戲頁面上載入同步程式才能<b>儲存目前進度</b>、<b>載入雲端存檔</b>和<b>自動儲存</b>。原網站可以登入遊戲帳號、使用排行榜。每台裝置、每個瀏覽器都要設定一次，以下兩種方式擇一。</p>
+
+      <h3>方式一：userscript（推薦，自動載入）</h3>
+      <p class="muted" style="margin-top:0">裝好之後，每次開遊戲左上角就會出現 🚇 按鈕並自動儲存，不用點書籤。登入使用你在遊戲裡登入的帳號，腳本本身不含任何登入資訊。</p>
+      <div class="row" style="margin-bottom:10px">
+        <a class="btn primary" href="/mms.user.js" target="_blank" rel="noopener">安裝 userscript</a>
+      </div>
+      <details style="margin-bottom:14px">
+        <summary>如何安裝</summary>
+        <ol>
+          <li>先裝 userscript 管理器：
+            <ul>
+              <li>電腦 Chrome／Edge／Firefox：Tampermonkey 或 Violentmonkey 擴充功能（Chrome／Edge 要在擴充功能設定裡開啟「允許使用者指令碼」或開發人員模式）。</li>
+              <li>Mac／iPhone／iPad Safari：App Store 的「Userscripts」，並在 Safari 設定 → 延伸功能裡啟用，允許它在 metromaster.huangyouci.com 執行。</li>
+              <li>Android：Firefox，加上 Violentmonkey 擴充功能。</li>
+            </ul>
+          </li>
+          <li>按上面的「安裝 userscript」，管理器會跳出安裝畫面，按安裝。Safari Userscripts 則是開啟後點網址列的 Userscripts 圖示 → 安裝。</li>
+          <li>在遊戲的設定裡用 Google 或 Apple 登入帳號（只需一次），重新整理遊戲。左上角 🚇 按鈕不透明就代表已連上。</li>
+        </ol>
+      </details>
+
+      <h3>方式二：書籤</h3>
+      <p class="muted" style="margin-top:0">不能裝 userscript 的瀏覽器用這個。每次開啟或重新整理遊戲後，點一次書籤才會啟動同步和自動儲存。</p>
       <div class="row" style="margin-bottom:10px">
         <a class="bm" id="bookmarklet" data-bm="auto" href="#">🚇 存檔同步</a>
         <button data-copy-bm="auto">複製書籤網址</button>
