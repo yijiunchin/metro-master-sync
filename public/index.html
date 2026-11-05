@@ -58,6 +58,12 @@
   .versions .ver .info { flex: 1; min-width: 200px; font-size: 13px; }
   .versions .ver .info .muted { font-size: 12px; }
   .versions button { font-size: 13px; padding: 5px 10px; background: var(--bg); }
+  .picker { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--btn); }
+  .pp-note { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .pp-row { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--muted); margin-bottom: 8px; }
+  .pp-row select { font: inherit; font-size: 14px; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); max-width: 100%; }
+  .pp-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .pp-status { font-size: 13px; color: var(--danger, #d1242f); }
   .actions { display: flex; flex-wrap: wrap; gap: 6px; }
   .pending { background: var(--warn-bg); color: var(--warn-fg); border-radius: 12px; padding: 12px 14px; margin-bottom: 16px; }
   .section-label { font-size: 13px; font-weight: 600; color: var(--muted); margin: 14px 0 2px; }
@@ -300,6 +306,7 @@
       <div class="slots">${slotsHtml}</div>
       <div class="actions">
         <button class="primary" data-act="load-play">載入到我的網域版</button>
+        <button data-act="pick-play" title="只把其中一份計劃匯入我的網域版，覆蓋同城市的一份計劃">單一計劃到我的網域版</button>
         <button data-act="import">匯入到原網站</button>
         <button data-act="download">下載</button>
         ${s.source === 'auto-save' ? '<button data-act="versions">歷史版本</button>' : ''}
@@ -309,6 +316,7 @@
         <button class="danger" data-act="delete">刪除</button>
       </div>
       ${s.source === 'auto-save' ? '<div class="versions hidden"></div>' : ''}
+      <div class="picker hidden"></div>
     </div>`;
   }
 
@@ -366,6 +374,39 @@
   }
 
   // 載入到我的網域版：同網域可以直接寫入遊戲資料
+  // 只把一份計劃匯入我的網域版（覆蓋同城市的一份計劃，不新增計劃）
+  async function togglePicker(item, s) {
+    const box = item.querySelector('.picker');
+    if (!box.classList.contains('hidden')) return box.classList.add('hidden');
+    box.classList.remove('hidden');
+    box.innerHTML = '<div class="muted">載入中…</div>';
+    const { data } = await api('/api/snapshots/' + s.id);
+    // 讓開著的 /play/ 分頁先把最新進度寫進 localStorage，列出的本機計劃才準
+    C.broadcast('flush');
+    await C.sleep(300);
+    C.renderPlanPicker(box, data, async (src, target) => {
+      C.broadcast('flush');
+      await C.sleep(300);
+      const current = C.readLocal();
+      if (C.hasProgress(current)) {
+        await api('/api/snapshots', {
+          method: 'POST',
+          body: JSON.stringify({ name: '匯入前自動備份', device: C.device(), source: 'auto-backup', data: current }),
+        });
+      }
+      C.broadcast('freeze');
+      await C.sleep(150);
+      try {
+        C.importPlan(data, src, target);
+      } catch (err) {
+        C.broadcast('unfreeze');
+        throw err;
+      }
+      C.broadcast('reload');
+      location.href = '/play/';
+    });
+  }
+
   async function loadToPlay(s) {
     if (!confirm(`要用「${s.name || '未命名存檔'}」覆蓋我的網域版目前的遊戲進度嗎？\n（目前進度會先自動備份到雲端）`)) return false;
     const { data, snapshot } = await api('/api/snapshots/' + s.id);
@@ -525,6 +566,9 @@
           downloadJson(r.data, s.name, s.createdAt);
           break;
         }
+        case 'pick-play':
+          await togglePicker(btn.closest('.item'), s);
+          break;
         case 'versions':
           await toggleVersions(btn.closest('.item'), s);
           break;

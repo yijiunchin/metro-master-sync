@@ -282,6 +282,15 @@
   .unlock { display: flex; align-items: center; gap: 6px; padding-top: 10px; border-top: 1px solid #e3e6ea; margin-top: 8px; cursor: pointer; }
   .unlock input { flex: none; width: 18px; height: 18px; margin: 0; }
   .tag { font-size: 11px; padding: 1px 6px; border-radius: 6px; background: #ddf4ff; color: #0550ae; margin-left: 4px; }
+  .item button + button { margin-left: 4px; }
+  .picker { border: 1px solid rgba(127,127,127,.3); border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; }
+  .picker .ph { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .picker .ph b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pp-note { font-size: 12px; color: #6a737d; margin-bottom: 8px; }
+  .pp-row { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: #6a737d; margin-bottom: 8px; }
+  .pp-row select { font: inherit; font-size: 14px; padding: 6px 8px; border-radius: 8px; border: 1px solid #cfd6dd; max-width: 100%; color: inherit; background: transparent; }
+  .pp-actions { display: flex; align-items: center; gap: 8px; }
+  .pp-status { font-size: 13px; color: #d1242f; }
 </style>
 <div class="backdrop"></div>
 <div class="panel" role="dialog" aria-label="Metro Master Sync">
@@ -295,6 +304,7 @@
     <label class="unlock"><input type="checkbox" id="unlock-all" /> 解鎖全部功能（計劃 4/5・自訂顏色・區間 3）</label>
     <div class="status" id="status"></div>
     <div id="pending"></div>
+    <div id="picker" class="picker" hidden></div>
     <div id="list"><div class="muted">載入中…</div></div>
   </div>
 </div>`;
@@ -320,7 +330,7 @@
 
     function render() {
       $('#pending').innerHTML = pending
-        ? `<div class="pending"><span>待匯入：<b>${esc(pending.name || '未命名存檔')}</b></span><button class="primary" data-act="load" data-id="${esc(pending.id)}">載入</button><button data-act="clear-pending">略過</button></div>`
+        ? `<div class="pending"><span>待匯入：<b>${esc(pending.name || '未命名存檔')}</b></span><button class="primary" data-act="load" data-id="${esc(pending.id)}">載入</button><button data-act="pick" data-id="${esc(pending.id)}">選計劃</button><button data-act="clear-pending">略過</button></div>`
         : '';
       $('#list').innerHTML = snapshots.length
         ? snapshots
@@ -329,7 +339,7 @@
               (s) => `<div class="item"><div class="info">
             <div class="name">${esc(s.name || '未命名存檔')}${s.pinned ? '<span class="tag">釘選</span>' : ''}${sourceTag[s.source] ? `<span class="tag">${sourceTag[s.source]}</span>` : ''}</div>
             <div class="muted">${fmtTime(s.updatedAt || s.createdAt)}・${esc(s.device || '?')}・${esc(describe(s))}</div>
-          </div><button data-act="load" data-id="${esc(s.id)}">載入</button></div>`,
+          </div><button data-act="pick" data-id="${esc(s.id)}" title="只匯入其中一份計劃">選計劃</button><button data-act="load" data-id="${esc(s.id)}">載入</button></div>`,
             )
             .join('')
         : '<div class="muted">雲端還沒有存檔，先按「儲存目前進度」吧。</div>';
@@ -393,6 +403,38 @@
       location.reload();
     }
 
+    // 只匯入一份計劃：覆蓋本機同城市的其中一份，不新增計劃
+    async function openPicker(id) {
+      const meta = snapshots.find((s) => s.id === id) || (pending?.id === id ? pending : null);
+      const box = $('#picker');
+      box.hidden = false;
+      box.innerHTML = `<div class="ph"><b>從「${esc(meta?.name || '未命名存檔')}」選計劃</b><button class="x" data-act="close-picker" aria-label="關閉">✕</button></div><div class="pp">載入中…</div>`;
+      const { data } = await api('/api/snapshots/' + id);
+      C.flushGame();
+      C.renderPlanPicker(box.querySelector('.pp'), data, async (src, target) => {
+        C.flushGame();
+        if (C.hasProgress(C.readLocal())) {
+          setStatus('備份目前進度中…');
+          await saveCurrent('匯入前自動備份', 'auto-backup');
+        }
+        if (pending?.id === id) await api('/api/pending', { method: 'DELETE' }).catch(() => {});
+        setStatus('寫入中，即將重新載入遊戲…');
+        C.freezeWrites();
+        C.broadcast('freeze');
+        await C.sleep(150);
+        try {
+          C.importPlan(data, src, target);
+        } catch (err) {
+          C.unfreezeWrites();
+          C.broadcast('unfreeze');
+          throw err;
+        }
+        C.broadcast('reload');
+        location.reload();
+      });
+      box.scrollIntoView({ block: 'nearest' });
+    }
+
     root.addEventListener('click', async (e) => {
       const btn = e.target.closest('[data-act]');
       if (!btn && e.target.classList.contains('backdrop')) return host.remove();
@@ -408,6 +450,10 @@
           await refresh();
         } else if (act === 'load') {
           await load(btn.dataset.id);
+        } else if (act === 'pick') {
+          await openPicker(btn.dataset.id);
+        } else if (act === 'close-picker') {
+          $('#picker').hidden = true;
         } else if (act === 'clear-pending') {
           await api('/api/pending', { method: 'DELETE' });
           pending = null;

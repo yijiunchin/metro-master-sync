@@ -138,6 +138,34 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 7. 刪除所有可同步的 key，寫入存檔的 key；寫入失敗會還原成原本的內容。
 8. 重新整理頁面。
 
+### 只匯入單一計劃
+
+整份載入會把這個瀏覽器的所有計劃、所有城市都換成存檔的內容。如果只想搬其中一份（例如把 `/play/` 玩好的一份搬到原網站上榜），用「選計劃」：
+
+| 位置 | 按鈕 | 寫入到 |
+|---|---|---|
+| 🚇 面板的每筆存檔、待匯入列 | 「選計劃」 | 目前這個網域（原網站或 `/play/`） |
+| 管理介面的每筆存檔 | 「單一計劃到我的網域版」 | 我的網域版 `/play/`，完成後跳到 `/play/` |
+
+選擇方式：
+
+1. **來源**：列出存檔裡所有計劃，格式是「城市・計劃 N：車站 / 路線 / 日運量」。也會列出挑戰（`qsave.<slug>`），以及還沒升級的舊版計劃（`save~N`，顯示「舊版計劃 N」）。舊版升級後留下的指標不會列出。
+2. **覆蓋**：列出這個瀏覽器**同一個城市**的計劃，預設選目前的計劃。
+   - 計劃：選一份要被覆蓋的本機計劃。
+   - 該城市在這個瀏覽器還沒有任何計劃：只能「建立成第 1 份」。
+   - 挑戰：固定覆蓋本機同一個挑戰。
+
+**不會新增計劃**：只會覆蓋你選的那一份，計劃數量不變（遊戲的計劃數有上限，計劃 4、5 需要付費解鎖，所以不會自動多開）。唯一例外是城市本來沒有任何計劃時建立第 1 份。
+
+寫入的內容：
+
+- 計劃：把來源的存檔寫到 `psave.<目標 id>`、摘要寫到 `psummary.<目標 id>`，刪除 `pstats.<目標 id>`（遊戲會重算）。`planlist` 的 id 和順序不變，只把 `current` 改成目標，讓重新載入後直接開這份。來源是舊版 `save~N` 時一樣寫成第 5 版鍵名。
+- 挑戰：寫入 `qsave.<slug>`、`qsummary.<slug>`，刪除 `qstats.<slug>`。
+- 把上次的城市（`transit-planner:v4:city`）設成來源的城市。
+- 其他計劃、其他城市、解鎖紀錄等都不動。
+
+流程和整份載入相同：先讓遊戲把最新進度寫進 localStorage、存一份「匯入前自動備份」、暫停遊戲寫入並通知其他分頁，寫入後重新載入。寫入失敗會還原改過的 key。匯入後清除 `mms:autosave-hash`，所以自動儲存下次一定會上傳新的狀態。
+
 ---
 
 ## 管理介面功能
@@ -157,6 +185,7 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 | 按鈕 | 作用 |
 |---|---|
 | 載入到我的網域版 | 備份目前進度 → 寫入 → 通知其他分頁重新整理 → 跳到 `/play/` |
+| 單一計劃到我的網域版 | 展開選計劃表單，只把一份計劃覆蓋到我的網域版同城市的一份計劃。見[只匯入單一計劃](#只匯入單一計劃)。 |
 | 匯入到原網站 | 設成「待匯入」（`PUT /api/pending`）並開啟原遊戲網站；在那裡點書籤就會出現一鍵載入。為了避免 Safari 擋掉 `await` 之後的 `window.open`，會先同步開好視窗再導向。 |
 | 下載 | 下載 `{version:1, keys:{...}}` JSON，檔名 `metromaster-<名稱>-<YYYY-MM-DD-HH-MM>.json` |
 | 解鎖全部 | 把這筆存檔補成「全解」（`owned:true`，等同 `unlock_all`），一併解鎖 計劃 4/5、自訂顏色、區間 3。只改 `transit-planner:v4:unlock` 一個 key，其餘內容保留；已全解的不會重複改。見下方[解鎖全部功能](#解鎖全部功能可選)。 |
@@ -470,6 +499,8 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | 「有進度」判斷 | `/^transit-planner:v4:(?:broken\d?\.)?[pq]?save/` | 有 `psave.*`、`qsave.*` 或舊版 `save*` 才算有進度；只有解鎖紀錄、計劃清單時視為沒有進度 |
 | `UNLOCK_KEY` | `transit-planner:v4:unlock` | 遊戲的商店解鎖紀錄（JSON 字串，含 `owned`、`unlocked` 等）；`applyUnlockAll` 把 `owned` 補成 `true`、保留其餘欄位，缺損才用遊戲預設建檔，是非破壞性、冪等的 |
 | `mms:unlock-all` | `'1'` = 開啟 | 「解鎖全部功能」開關（定義在 `inject.js`，每台裝置、每個網域分開），預設關閉；開啟後本機的存檔/自動儲存都會補上全解 |
+| 單一計劃鍵名 | `psave.<id>`、`psummary.<id>`、`pstats.<id>`、`planlist`、`qsave.<slug>`，非台北加 `@<城市>` | `listPlans`、`localPlans`、`importPlan` 用；舊版指標 `{"v":999,"moved":id}` 不算計劃 |
+| 新計劃 id | 20 碼 `A-Za-z0-9`，和遊戲相同 | 只在城市沒有任何計劃、建立第 1 份時使用 |
 | `IMPORT_MARK` | `mms:import-at` | 匯入時寫入時間戳，通知其他分頁 |
 | `TOKEN_KEY` | `mms:token` | 登入 token |
 | `CURRENT_KEY` | `mms:current` | 目前進度對應的存檔 `{id, name, source}` |
@@ -489,7 +520,7 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | 自動儲存開關 key | `mms:autosave-on` | |
 | 上次自動儲存時間 key | `mms:autosave-last` | |
 | keepalive 門檻 | 60,000 字元 | |
-| 面板列表 | 最多 50 筆 | |
+| 面板列表 | 最多 50 筆；每筆有「選計劃」（單一計劃匯入）和「載入」（整份載入） | |
 | 🚇 按鈕 | `left:12px; top: safe-area + 64px`，40×40px，`z-index: 2147483646` | |
 | 面板 | 最大寬度 420px，`z-index: 2147483647`，使用 Shadow DOM 隔離樣式；攔截 keydown/keyup/keypress/wheel，避免觸發遊戲快捷鍵 | |
 | 面板來源標籤 | `auto-save` 自動儲存、`auto-backup` 匯入前備份 | |
