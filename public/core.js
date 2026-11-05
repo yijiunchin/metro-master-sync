@@ -14,7 +14,8 @@
   const AUTOSAVE_ID_KEY = 'mms:autosave-id';
   const AUTOSAVE_HASH_KEY = 'mms:autosave-hash';
 
-  const isStatsCache = (k) => k.startsWith(PFX + 'v4:') && /^q?stats[~.@]|^q?stats$/.test(k.slice(19));
+  // 統計快取（遊戲可重算，不上傳）：stats、pstats.<id>、qstats.<slug>，可帶 ~N、@城市
+  const isStatsCache = (k) => k.startsWith(PFX + 'v4:') && /^[pq]?stats[~.@]|^[pq]?stats$/.test(k.slice(19));
   const syncable = (k) => k.startsWith(PFX) && !LOCAL_ONLY.has(k);
 
   const proto = Storage.prototype;
@@ -71,7 +72,8 @@
   }
 
   // 只有解鎖紀錄、沒有任何存檔時不算有進度
-  const hasProgress = (data) => Object.keys(data.keys).some((k) => /^transit-planner:v4:(?:broken\d?\.)?q?save/.test(k));
+  // 第 5 版是 psave.<id>、挑戰是 qsave.<slug>；舊版是 save[~N]
+  const hasProgress = (data) => Object.keys(data.keys).some((k) => /^transit-planner:v4:(?:broken\d?\.)?[pq]?save/.test(k));
 
   // 商店解鎖紀錄：遊戲把這份的 owned:true 視為已買 unlock_all（ALL ACCESS），
   // 會一併解鎖 計劃 4/5、自訂顏色、區間 3 等。

@@ -385,18 +385,35 @@ function validateData(data) {
   return { version: 1, keys: Object.fromEntries(entries) };
 }
 
-// 從遊戲的 summary 欄位整理出簡短摘要（城市、方案、車站數、路線數、運量）
+// 從遊戲的 summary 欄位整理出簡短摘要（城市、計劃、車站數、路線數、運量）
+// 遊戲有兩代鍵名：
+// - 第 5 版：psummary.<計劃 id>[@城市]，計劃順序記在 planlist[@城市] 的 ids
+// - 舊版：summary[~N][@城市]（升級後遊戲會刪掉）；挑戰都是 qsummary.<slug>[@城市]
 function summarize(keys) {
+  const PFX = 'transit-planner:v4:';
   const slots = [];
-  const re = /^transit-planner:v4:(?:summary(?:~(\d{1,2}))?|qsummary\.([a-z0-9]{1,16}))(?:@([a-z0-9_-]{1,40}))?$/;
+  const order = {};
+  const planIndex = (city, id) => {
+    if (!(city in order)) {
+      try {
+        order[city] = JSON.parse(keys[PFX + (city === 'taipei' ? 'planlist' : 'planlist@' + city)] || '{}').ids || [];
+      } catch {
+        order[city] = [];
+      }
+    }
+    const i = order[city].indexOf(id);
+    return i < 0 ? '?' : i + 1;
+  };
+  const re = /^transit-planner:v4:(?:summary(?:~(\d{1,6}))?|psummary\.([A-Za-z0-9_-]{1,64})|qsummary\.([a-z0-9]{1,16}))(?:@([a-z0-9_-]{1,40}))?$/;
   for (const [k, v] of Object.entries(keys)) {
     const m = re.exec(k);
     if (!m) continue;
+    const city = m[4] || 'taipei';
     try {
       const s = JSON.parse(v);
       slots.push({
-        c: m[3] || 'taipei',
-        p: m[2] ? 'q:' + m[2] : Number(m[1] || 1),
+        c: city,
+        p: m[3] ? 'q:' + m[3] : m[2] ? planIndex(city, m[2]) : Number(m[1] || 1),
         st: s.stations | 0,
         l: s.lines | 0,
         r: Math.round(s.riders || 0),
@@ -405,7 +422,7 @@ function summarize(keys) {
   }
   slots.sort((a, b) => b.st - a.st);
   return {
-    city: keys['transit-planner:v4:city'] || null,
+    city: keys[PFX + 'city'] || null,
     slots: slots.slice(0, 12),
   };
 }

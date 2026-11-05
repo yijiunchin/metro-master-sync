@@ -237,7 +237,7 @@
   const fmtTime = (t) => new Date(t).toLocaleString('zh-TW', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
   const fmtSize = (n) => n > 1048576 ? (n / 1048576).toFixed(1) + ' MB' : Math.max(1, Math.round(n / 1024)) + ' KB';
   const fmtNum = (n) => n >= 10000 ? (n / 10000).toFixed(1) + ' 萬' : String(n);
-  const slotLabel = (p) => typeof p === 'string' && p.startsWith('q:') ? '挑戰 ' + p.slice(2) : '方案 ' + p;
+  const slotLabel = (p) => typeof p === 'string' && p.startsWith('q:') ? '挑戰 ' + p.slice(2) : '計劃 ' + p;
   const sourceLabel = { manual: '手動儲存', 'auto-save': '自動儲存', 'auto-backup': '匯入前備份', upload: '檔案上傳', restore: '從歷史版本還原' };
   const slotsText = (slots) => slots.map((x) => `${esc(x.c)}・${esc(slotLabel(x.p))}：${x.st} 站 / ${x.l} 線 / 日運量 ${fmtNum(x.r)}`).join('<br>');
 

@@ -171,7 +171,7 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 - **顯示匯入前備份**：預設隱藏 `auto-backup` 存檔（釘選的除外），勾選後才會顯示。
 - 來源標籤：`manual` 手動儲存、`auto-save` 自動儲存、`auto-backup` 匯入前備份、`upload` 檔案上傳、`restore` 從歷史版本還原。
 - 更新時間比建立時間晚 1 秒以上時，顯示「更新於 …」。
-- 每筆存檔會顯示摘要：城市・方案（或挑戰）：車站數 / 路線數 / 日運量，最多 12 個方案，依車站數排序。
+- 每筆存檔會顯示摘要：城市・計劃 N（或挑戰）：車站數 / 路線數 / 日運量，最多 12 份，依車站數排序。計劃編號是它在遊戲計劃清單（`planlist`）裡的順序；不在清單裡的顯示「計劃 ?」。摘要是存檔寫入時算好的，這次改版前建立的存檔要等下次覆寫（例如自動儲存）才會更新。
 
 ### 解鎖全部功能（可選）
 
@@ -234,7 +234,7 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 | 數量上限 | 每筆自動儲存約 80 份（實測模擬 200 天、每 5 分鐘自動儲存一次，保留 82 份） |
 | 清理時機 | 每次新增版本時順便清掉超出規則的版本；刪除存檔時一併刪除它的所有版本 |
 
-在管理介面的自動儲存項目按「歷史版本」，會在下方列出所有版本（時間、裝置、大小、前 3 個方案的摘要）：
+在管理介面的自動儲存項目按「歷史版本」，會在下方列出所有版本（時間、裝置、大小、前 3 份計劃的摘要）：
 
 - **還原成新存檔**：把那個版本複製成一筆新的存檔（來源標籤「從歷史版本還原」，名稱是「原名稱（時間 版本）」），原本的自動儲存和其他版本都不變。之後就能像一般存檔一樣載入到我的網域版、匯入到原網站或下載。
 - **下載**：下載那個版本的 JSON，格式和一般存檔的下載相同。
@@ -456,7 +456,7 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | `device` 長度上限 | 60 字元 | |
 | `source` 長度上限 | 20 字元 | |
 | `summary` 長度上限 | 1200 字元（JSON 字串） | R2 自訂 metadata 總共只能 2KB |
-| 摘要方案數 | 最多 12 個，依車站數由多到少 | |
+| 摘要計劃數 | 最多 12 份，依車站數由多到少 | 解析 `psummary.<id>`（第 5 版）、`summary~N`（舊版）、`qsummary.<slug>`（挑戰） |
 | 列表分頁 | 每次向 R2 取 1000 筆，自動翻頁到底 | |
 | 列表排序 | `updatedAt` 由新到舊 | |
 
@@ -466,8 +466,8 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 |---|---|---|
 | `PFX` | `transit-planner:` | 遊戲資料的 key 前綴 |
 | `LOCAL_ONLY` | `transit-planner:v4:lang`、`transit-planner:house-ad-last` | 各裝置自己的設定（語言、上次顯示廣告時間），不同步 |
-| 統計快取 | `transit-planner:v4:` 後面接 `stats`、`qstats`、`stats~N`、`stats.x`、`stats@city` 等 | 遊戲可以重算，不上傳以節省空間 |
-| 「有進度」判斷 | `/^transit-planner:v4:(?:broken\d?\.)?q?save/` | 只有解鎖紀錄、沒有存檔時視為沒有進度 |
+| 統計快取 | `transit-planner:v4:` 後面接 `stats`、`pstats.<id>`、`qstats.<slug>`、`stats~N`，可再接 `@city` | 遊戲可以重算，不上傳以節省空間 |
+| 「有進度」判斷 | `/^transit-planner:v4:(?:broken\d?\.)?[pq]?save/` | 有 `psave.*`、`qsave.*` 或舊版 `save*` 才算有進度；只有解鎖紀錄、計劃清單時視為沒有進度 |
 | `UNLOCK_KEY` | `transit-planner:v4:unlock` | 遊戲的商店解鎖紀錄（JSON 字串，含 `owned`、`unlocked` 等）；`applyUnlockAll` 把 `owned` 補成 `true`、保留其餘欄位，缺損才用遊戲預設建檔，是非破壞性、冪等的 |
 | `mms:unlock-all` | `'1'` = 開啟 | 「解鎖全部功能」開關（定義在 `inject.js`，每台裝置、每個網域分開），預設關閉；開啟後本機的存檔/自動儲存都會補上全解 |
 | `IMPORT_MARK` | `mms:import-at` | 匯入時寫入時間戳，通知其他分頁 |
@@ -566,7 +566,18 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
 
 規則：`version` 必須是 `1`，`keys` 不能是空的，每個 key 都要以 `transit-planner:` 開頭，值必須是字串。
 
-遊戲常見的 key：`save`、`summary`、`plans`、`records`、`unlock`、`city`、`~N`（方案 N）、`@city`（各城市）、`q*`（挑戰模式）。
+遊戲常見的 key（都在 `transit-planner:v4:` 之後；台北不加 `@city`，其他城市加 `@<城市>`）：
+
+| key | 內容 |
+|---|---|
+| `planlist[@city]` | 計劃清單 `{"ids":["<20 碼 id>",...],"current":"<id>"}`，順序就是遊戲裡的「第 N 份」 |
+| `psave.<id>[@city]` | 計劃存檔（第 5 版），可能是壓縮格式 |
+| `psummary.<id>[@city]` | 計劃摘要 JSON（`riders`、`stations`、`lines` 等） |
+| `pstats.<id>[@city]` | 計劃統計快取，遊戲會重算 |
+| `qsave.<slug>`、`qsummary.<slug>`、`qstats.<slug>` | 挑戰模式 |
+| `save~N`、`summary~N`、`stats~N` | 舊版計劃鍵名。遊戲升級時會把舊進度搬到 `p*.<id>`，`save~N` 留下來當指向新 id 的指標，`summary~N`、`stats~N` 刪除 |
+| `planmove[@city]` | 舊編號 → 新 id 的對照表（升級用） |
+| `unlock`、`records`、`city`、`lang` 等 | 解鎖紀錄、紀錄、上次的城市、語言 |
 
 ### Meta（存檔資訊）
 
@@ -594,7 +605,7 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
 | `createdAt` / `updatedAt` | 毫秒時間戳 |
 | `size` | R2 物件大小（bytes） |
 | `summary.slots[].c` | 城市代碼 |
-| `summary.slots[].p` | 方案編號（數字），或挑戰 `q:<代碼>` |
+| `summary.slots[].p` | 計劃編號（數字，`planlist` 裡的順序，從 1 開始；不在清單裡是 `"?"`；舊版存檔是 `~N` 的 N），或挑戰 `q:<代碼>` |
 | `summary.slots[].st` / `l` / `r` | 車站數 / 路線數 / 日運量 |
 
 ### Version（歷史版本資訊）
