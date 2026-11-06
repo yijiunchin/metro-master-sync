@@ -42,6 +42,9 @@
     return false;
   }
 
+  // 先裝上背景執行緒的監聽，勾選「固定顯示計算監測面板」之前的進度也記得到
+  const monitor = createMonitor();
+
   if (window.MMSCore) start();
   else {
     const s = document.createElement('script');
@@ -54,6 +57,10 @@
   function start() {
     const C = window.MMSCore;
     const getToken = () => cfg.token || C.storedToken();
+    if (monitor.pinned()) {
+      if (document.body) monitor.show();
+      else document.addEventListener('DOMContentLoaded', () => monitor.show());
+    }
 
     if (!resident) {
       // 第一次點書籤後就在這個分頁啟動自動儲存（重新整理頁面後要再點一次書籤）
@@ -159,6 +166,223 @@
     };
     if (document.body) onBody();
     else document.addEventListener('DOMContentLoaded', onBody);
+  }
+
+  // ---------- 計算監測 ----------
+  // 遊戲把模擬（stepWorker）和正式統計（「計算中」，透過 officialPort 跑在同一個 Worker）放在背景執行緒。
+  // 這裡包裝 Worker.prototype.postMessage，只讀取雙方往來的訊息；遊戲載入後才裝上也能運作。
+  // 「加速計算」會把遊戲送出的工作比例（budget.duty）改成 1；遊戲預設依操作狀態給 15%～100%。
+  function createMonitor() {
+    if (window.__MMS_MON__) return window.__MMS_MON__;
+    const PIN_KEY = 'mms:monitor-on';
+    const now = () => performance.now();
+    const S = { duty: null, port: null, turbo: false, seq: null, rounds: 0, startAt: 0, lastAt: 0, gaps: [], done: [], stepOut: new Map(), stepLat: [] };
+    const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
+    const fmt = (ms) => (ms == null ? '—' : ms < 1000 ? Math.round(ms) + ' ms' : (ms / 1000).toFixed(1) + ' 秒');
+    // 省電模式會再減半（7.5%／15%／25%／50%），和一般模式的數值重疊，所以只標一般模式的意思
+    const DUTY = { 0.15: '操作中', 0.3: '剛操作過', 0.5: '閒置', 1: '背景／首頁' };
+
+    const onIn = (d) => {
+      if (!d || typeof d !== 'object') return;
+      if (d.kind === 'off' && d.reply) {
+        const r = d.reply;
+        if (r.kind === 'progress') {
+          const t = now();
+          if (S.seq !== r.seq) Object.assign(S, { seq: r.seq, rounds: 0, startAt: t, lastAt: t, gaps: [] });
+          else if (S.lastAt) S.gaps.push(t - S.lastAt), S.gaps.length > 20 && S.gaps.shift();
+          S.rounds = r.rounds;
+          S.lastAt = t;
+        } else if (r.kind === 'solved' || r.kind === 'error') {
+          if (r.kind === 'solved') {
+            const o = r.official || {};
+            S.done.unshift({ at: Date.now(), rounds: o.rounds, by: o.by, ms: r.ms, wallMs: r.wallMs });
+            S.done.length = Math.min(S.done.length, 3);
+          }
+          S.seq = null;
+        }
+      } else if (d.kind === 'step' && S.stepOut.has(d.seq)) {
+        S.stepLat.push(now() - S.stepOut.get(d.seq));
+        S.stepOut.delete(d.seq);
+        S.stepLat.length > 30 && S.stepLat.shift();
+      }
+    };
+    const onOut = (d) => {
+      if (!d || typeof d !== 'object') return d;
+      if (d.kind === 'step' && d.seq != null) {
+        S.stepOut.set(d.seq, now());
+        // 被丟掉的請求不會有回覆，避免越積越多
+        if (S.stepOut.size > 50) S.stepOut.delete(S.stepOut.keys().next().value);
+      }
+      if (d.kind === 'off' && d.msg?.kind === 'budget') {
+        S.duty = d.msg.duty;
+        if (S.turbo) return { ...d, msg: { ...d.msg, duty: 1 } };
+      }
+      return d;
+    };
+
+    const seen = new WeakSet();
+    const post = Worker.prototype.postMessage;
+    if (typeof Worker !== 'undefined') {
+      Worker.prototype.postMessage = function (d, ...rest) {
+        try {
+          if (d?.kind === 'off') S.port = this;
+          if (!seen.has(this)) {
+            seen.add(this);
+            this.addEventListener('message', (e) => {
+              try {
+                onIn(e.data);
+              } catch {}
+            });
+          }
+          d = onOut(d);
+        } catch {}
+        return post.call(this, d, ...rest);
+      };
+    }
+
+    // 主執行緒卡頓：每 100ms 打點，記錄最近的最長延遲
+    let jank = 0;
+    let tick = null;
+
+    let host = null;
+    let timer = null;
+    const setTurbo = (on) => {
+      S.turbo = on;
+      if (S.port) post.call(S.port, { kind: 'off', msg: { kind: 'budget', duty: on ? 1 : (S.duty ?? 0.5) } });
+      render();
+    };
+
+    function render() {
+      if (!host) return;
+      const r = host.shadowRoot;
+      const t = now();
+      const L = [];
+      L.push('工作比例：' + (S.duty == null ? '等待遊戲送出' : (DUTY[S.duty] ? DUTY[S.duty] + ' ' : '') + +(S.duty * 100).toFixed(1) + '%') + (S.turbo ? ' → 加速 100%' : ''));
+      if (S.seq != null) {
+        const per = avg(S.gaps);
+        const idle = t - S.lastAt;
+        const stuck = per && idle > Math.max(60000, per * 6);
+        L.push(`正式統計：第 ${S.rounds} 回合（上限 600）`);
+        L.push(`  已算 ${fmt(t - S.startAt)}，每回合約 ${fmt(per)}`);
+        L.push(`  距上次進度 ${fmt(idle)}  ${stuck ? '⚠️ 可能卡住' : '✅ 有在推進'}`);
+      } else L.push('正式統計：目前沒有在算');
+      for (const d of S.done) {
+        const at = new Date(d.at).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
+        L.push(`  ✔ ${at} 算完：${d.rounds ?? '?'} 回合，運算 ${fmt(d.ms)}／經過 ${fmt(d.wallMs)}`);
+      }
+      L.push(`模擬回應：最近 ${fmt(S.stepLat[S.stepLat.length - 1])}，平均 ${fmt(avg(S.stepLat))}`);
+      L.push(`主執行緒延遲：${fmt(jank)}`);
+      r.querySelector('.t').textContent = L.join('\n');
+      r.querySelector('button').textContent = S.turbo ? '關閉加速' : '加速計算';
+      r.querySelector('button').classList.toggle('on', S.turbo);
+    }
+
+    function show() {
+      if (host?.isConnected) return;
+      host = document.createElement('div');
+      host.id = 'mms-mon';
+      host.style.cssText = 'position:fixed;z-index:2147483645;left:12px;top:calc(env(safe-area-inset-top) + 112px);pointer-events:none;';
+      const root = host.attachShadow({ mode: 'open' });
+      root.innerHTML = `<style>
+  .box { background: rgba(20,22,26,.86); color: #eef1f4; font: 11.5px/1.5 ui-monospace, Menlo, Consolas, monospace; padding: 7px 9px; border-radius: 8px; max-width: min(320px, calc(100vw - 24px)); }
+  .h { display: flex; align-items: center; gap: 8px; font: 600 12px -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif; margin-bottom: 3px; }
+  .h span { flex: 1; }
+  .t { white-space: pre-wrap; }
+  button { pointer-events: auto; font: 12px -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif; border: 0; border-radius: 6px; padding: 2px 8px; cursor: pointer; background: #e8ecf0; color: #1b1f24; }
+  button.on { background: #f0a020; }
+</style><div class="box"><div class="h"><span>🚇 計算監測</span><button type="button" title="把背景計算的工作比例固定成 100%；重新整理頁面就恢復遊戲預設">加速計算</button></div><div class="t"></div></div>`;
+      root.querySelector('button').addEventListener('click', (e) => {
+        e.stopPropagation();
+        setTurbo(!S.turbo);
+      });
+      document.body.appendChild(host);
+      let last = now();
+      tick = setInterval(() => {
+        const t = now();
+        jank = Math.max(jank * 0.9, t - last - 100);
+        last = t;
+      }, 100);
+      timer = setInterval(render, 500);
+      render();
+    }
+
+    function hide() {
+      clearInterval(timer);
+      clearInterval(tick);
+      host?.remove();
+      host = null;
+    }
+
+    const pinned = () => {
+      try {
+        return localStorage.getItem(PIN_KEY) === '1';
+      } catch {
+        return false;
+      }
+    };
+    const setPinned = (on) => {
+      try {
+        on ? localStorage.setItem(PIN_KEY, '1') : localStorage.removeItem(PIN_KEY);
+      } catch {}
+      on ? show() : hide();
+    };
+
+    return (window.__MMS_MON__ = { state: S, show, hide, pinned, setPinned, setTurbo });
+  }
+
+  // ---------- 排行榜檢查 ----------
+  // 只讀 localStorage：各計劃摘要（可上的榜）、遊戲帳號雲端同步紀錄、這台裝置送上榜的紀錄
+  function boardReport() {
+    const V4 = 'transit-planner:v4:';
+    const get = (k) => {
+      try {
+        return JSON.parse(localStorage.getItem(k));
+      } catch {
+        return null;
+      }
+    };
+    const listOf = (city) => (get(V4 + 'planlist' + (city === 'taipei' ? '' : '@' + city)) || {}).ids || [];
+    const sums = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      const m = k && /^transit-planner:v4:(p|q)summary\.([A-Za-z0-9_-]+)(?:@([a-z0-9_-]+))?$/.exec(k);
+      if (m) sums.push({ kind: m[1], id: m[2], city: m[3] || 'taipei', s: get(k) || {} });
+    }
+    // 遊戲模型版本：取摘要中最新的那個（格式 YYMMDD-HHMM，字串比較即可）
+    const model = sums.reduce((a, x) => (typeof x.s.model === 'string' && x.s.model > a ? x.s.model : a), '');
+    const label = (kind, id, city) => {
+      if (kind === 'q') return `${city}・挑戰 ${id}`;
+      const no = listOf(city).indexOf(id) + 1;
+      return `${city}・計劃 ${no || '?'}`;
+    };
+    const plans = sums
+      .map(({ kind, id, city, s }) => {
+        const ratio = Number.isFinite(s.ratio) ? Math.round(s.ratio * 1000) : null;
+        const ok = !!(s.official && s.key && s.model === model);
+        return {
+          label: label(kind, id, city),
+          stations: s.stations,
+          lines: s.lines,
+          riders: s.riders,
+          ratio,
+          ok,
+          boards: kind === 'q' ? '挑戰榜' : !ok ? '（還不能上）' : ratio != null && ratio >= 1000 ? '日運量、收支平衡' : '只有日運量',
+        };
+      })
+      .sort((a, b) => a.label.localeCompare(b.label));
+    // 同步單位 p:<城市>:<計劃 id> 或 q:<城市>:<挑戰>
+    const unitLabel = (u) => {
+      const m = /^([pq]):([a-z0-9_-]+):(.+)$/.exec(u || '');
+      return m ? label(m[1], m[3], m[2]) : u || '—';
+    };
+    const acc = get(V4 + 'account');
+    const units = acc?.units ? Object.entries(acc.units).map(([u, v]) => ({ label: unitLabel(u), rev: v.rev, stations: v.stations })) : null;
+    const b = get('transit-planner-account:board');
+    const ledger = Object.entries(b?.docs || {})
+      .map(([id, d]) => ({ id, ...d, from: d.unit ? unitLabel(d.unit) : '—' }))
+      .sort((x, y) => (y.at || 0) - (x.at || 0));
+    const wait = Object.entries(b?.wait || {}).map(([id, t]) => ({ id, until: t }));
+    return { plans, units, ledger, wait };
   }
 
   // 自動儲存：進度有變動時定期上傳，切到背景時也存一次。
@@ -291,6 +515,17 @@
   .pp-row select { font: inherit; font-size: 14px; padding: 6px 8px; border-radius: 8px; border: 1px solid #cfd6dd; max-width: 100%; color: inherit; background: transparent; }
   .pp-actions { display: flex; align-items: center; gap: 8px; }
   .pp-status { font-size: 13px; color: #d1242f; }
+  .unlock + .unlock { border-top: 0; margin-top: 0; }
+  .tools { display: flex; gap: 8px; margin-top: 10px; }
+  .board { border: 1px solid rgba(127,127,127,.3); border-radius: 10px; padding: 10px 12px; margin-top: 10px; }
+  .board h4 { margin: 10px 0 4px; font-size: 13px; }
+  .board h4:first-child { margin-top: 0; }
+  .board .wrap { overflow-x: auto; }
+  .board table { border-collapse: collapse; width: 100%; font-size: 12px; white-space: nowrap; }
+  .board th, .board td { text-align: left; padding: 3px 6px 3px 0; border-bottom: 1px solid rgba(127,127,127,.18); }
+  .board th { font-weight: 600; color: #6a737d; }
+  .board td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  .board .note { font-size: 12px; color: #6a737d; margin-top: 8px; line-height: 1.5; }
 </style>
 <div class="backdrop"></div>
 <div class="panel" role="dialog" aria-label="Metro Master Sync">
@@ -302,6 +537,9 @@
     </div>
     ${auto ? '<label class="auto"><input type="checkbox" id="auto" /> 自動儲存<span class="muted" id="auto-state"></span></label>' : ''}
     <label class="unlock"><input type="checkbox" id="unlock-all" /> 解鎖全部功能（計劃 4/5・自訂顏色・區間 3）</label>
+    <label class="unlock"><input type="checkbox" id="monitor" /> 固定顯示計算監測面板</label>
+    <div class="tools"><button data-act="board">排行榜檢查</button></div>
+    <div id="board" class="board" hidden></div>
     <div class="status" id="status"></div>
     <div id="pending"></div>
     <div id="picker" class="picker" hidden></div>
@@ -454,6 +692,12 @@
           await openPicker(btn.dataset.id);
         } else if (act === 'close-picker') {
           $('#picker').hidden = true;
+        } else if (act === 'board') {
+          const box = $('#board');
+          box.hidden = !box.hidden;
+          if (!box.hidden) renderBoard(box);
+        } else if (act === 'board-refresh') {
+          renderBoard($('#board'));
         } else if (act === 'clear-pending') {
           await api('/api/pending', { method: 'DELETE' });
           pending = null;
@@ -470,6 +714,46 @@
     });
 
     $('#name').value = C.current()?.name || '';
+
+    // 排行榜檢查：只讀本機資料，不會送出或修改任何東西
+    function renderBoard(box) {
+      const r = boardReport();
+      const n = (v) => (v == null ? '—' : esc(v));
+      const table = (head, rows) =>
+        `<div class="wrap"><table><tr>${head.map((h) => `<th>${h}</th>`).join('')}</tr>${rows.join('')}</table></div>`;
+      const tr = (cells) => `<tr>${cells.map((c) => (typeof c === 'object' ? `<td class="n">${c.n}</td>` : `<td>${c}</td>`)).join('')}</tr>`;
+      const wan = (v) => (v ? (v / 1e4).toFixed(1) + ' 萬' : '—');
+      let html = '<h4>① 各計劃可上的榜</h4>';
+      html += r.plans.length
+        ? table(
+            ['計劃', '站', '線', '日運量', '收支比', '統計', '可上的榜'],
+            r.plans.map((p) =>
+              tr([esc(p.label), { n: n(p.stations) }, { n: n(p.lines) }, { n: wan(p.riders) }, { n: p.ratio == null ? '—' : (p.ratio / 10).toFixed(1) + '%' }, p.ok ? '✅' : '❌ 未算完', esc(p.boards)]),
+            ),
+          )
+        : '<div class="muted">沒有計劃摘要</div>';
+      html += '<h4>② 遊戲雲端同步紀錄</h4>';
+      html += r.units
+        ? table(
+            ['計劃', '雲端版本', '站'],
+            r.units.map((u) => tr([esc(u.label), { n: n(u.rev) }, { n: n(u.stations) }])),
+          )
+        : '<div class="muted">沒有同步紀錄：遊戲沒有登入帳號，不會上榜</div>';
+      html += '<h4>③ 這台裝置送上榜的成績</h4>';
+      html += r.ledger.length
+        ? table(
+            ['來源計劃', '站', '線', '分數', '送出時間'],
+            r.ledger.map((d) => tr([esc(d.from), { n: n(d.stations) }, { n: n(d.lines) }, { n: n(d.score) }, d.at ? fmtTime(d.at) : '—'])),
+          )
+        : '<div class="muted">沒有紀錄</div>';
+      if (r.wait.length) html += `<div class="note">被拒絕、等待重送：${r.wait.map((w) => fmtTime(w.until) + ' 後').join('、')}</div>`;
+      html += `<div class="note">收支比 ≥ 100% 才能上「收支平衡」榜；每個榜只保留你最好的一份。上榜不是即時的：遊戲在同步時才送出（改完約 10 分鐘，或回到首頁），同一個榜每小時最多送一次。</div>
+        <div class="tools"><button data-act="board-refresh">重新整理</button></div>`;
+      box.innerHTML = html;
+    }
+    const monBox = $('#monitor');
+    monBox.checked = monitor.pinned();
+    monBox.addEventListener('change', () => monitor.setPinned(monBox.checked));
 
     if (auto) {
       const box = $('#auto');
