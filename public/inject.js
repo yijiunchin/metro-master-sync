@@ -24,6 +24,9 @@
   // 「解鎖全部（ALL ACCESS）」開關：勾了就在存檔/自動儲存時把商店紀錄補成 owned。
   // 開關存在本機（每台裝置、每個網域分開），預設關閉，是非破壞性的——關掉不會移除已補上的全解。
   const UNLOCK_ON_KEY = 'mms:unlock-all';
+  // 🚇 按鈕與計算監測面板拖動後的位置 {x,y}（每台裝置、每個網域分開）
+  const FAB_POS_KEY = 'mms:fab-pos';
+  const MON_POS_KEY = 'mms:monitor-pos';
 
   // 讀本機進度；勾了「解鎖全部」就一併把 transit-planner:v4:unlock 補成 owned
   function readGame(C) {
@@ -133,9 +136,11 @@
       fab.style.cssText =
         'position:fixed;z-index:2147483646;left:12px;top:calc(env(safe-area-inset-top) + 64px);width:40px;height:40px;' +
         'border-radius:50%;border:0;background:rgba(255,255,255,.92);box-shadow:0 2px 10px rgba(0,0,0,.25);font-size:20px;' +
-        'line-height:40px;padding:0;cursor:pointer;touch-action:manipulation;';
+        'line-height:40px;padding:0;cursor:pointer;touch-action:none;';
+      let justDragged = () => false;
       fab.addEventListener('click', async (e) => {
         e.stopPropagation();
+        if (justDragged()) return; // 拖動放開時不要打開面板
         if (!document.getElementById('mms-host')) {
           const ok = await ensureLogin();
           mark();
@@ -144,6 +149,7 @@
         togglePanel(C, getToken, auto);
       });
       document.body.appendChild(fab);
+      justDragged = draggable(fab, FAB_POS_KEY);
       // 還沒登入時按鈕半透明，提示需要先在遊戲裡登入帳號
       const mark = () => {
         const ok = onPlay || !!getToken();
@@ -178,6 +184,69 @@
     else document.addEventListener('DOMContentLoaded', onBody);
   }
 
+  // ---------- 拖動並記住位置 ----------
+  // el 是 position:fixed 的元素；在 handle 上按住移動超過 5px 才算拖動（短按仍是點擊）。
+  // 位置以 {x,y}（px）存在 localStorage[key]；套用時夾在視窗內，視窗大小改變時重新夾一次。
+  // skip(e) 回傳 true 時不開始拖動（例如按在面板裡的按鈕上）。回傳 justDragged()：剛拖完時讓呼叫端略過那次 click。
+  function draggable(el, key, handle = el, skip = () => false) {
+    let saved = null;
+    try {
+      const p = JSON.parse(localStorage.getItem(key));
+      if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) saved = p;
+    } catch {}
+    const place = (x, y) => {
+      x = Math.round(Math.min(Math.max(0, x), Math.max(0, innerWidth - el.offsetWidth)));
+      y = Math.round(Math.min(Math.max(0, y), Math.max(0, innerHeight - el.offsetHeight)));
+      el.style.left = x + 'px';
+      el.style.top = y + 'px';
+      el.style.right = el.style.bottom = 'auto';
+      return { x, y };
+    };
+    const apply = () => {
+      if (!el.isConnected) return removeEventListener('resize', apply); // 面板關掉後不再監聽
+      saved && place(saved.x, saved.y);
+    };
+    apply();
+    addEventListener('resize', apply);
+
+    let d = null;
+    let draggedAt = 0;
+    handle.style.touchAction = 'none';
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || skip(e)) return;
+      e.stopPropagation();
+      const r = el.getBoundingClientRect();
+      d = { id: e.pointerId, sx: e.clientX, sy: e.clientY, ox: r.left, oy: r.top, moved: false };
+      try {
+        handle.setPointerCapture(e.pointerId);
+      } catch {}
+    });
+    handle.addEventListener('pointermove', (e) => {
+      if (!d || e.pointerId !== d.id) return;
+      const dx = e.clientX - d.sx;
+      const dy = e.clientY - d.sy;
+      if (!d.moved && Math.hypot(dx, dy) < 5) return;
+      d.moved = true;
+      e.preventDefault();
+      place(d.ox + dx, d.oy + dy);
+    });
+    const end = (e) => {
+      if (!d || e.pointerId !== d.id) return;
+      if (d.moved) {
+        const r = el.getBoundingClientRect();
+        saved = { x: Math.round(r.left), y: Math.round(r.top) };
+        try {
+          localStorage.setItem(key, JSON.stringify(saved));
+        } catch {}
+        draggedAt = Date.now();
+      }
+      d = null;
+    };
+    handle.addEventListener('pointerup', end);
+    handle.addEventListener('pointercancel', end);
+    return () => Date.now() - draggedAt < 400;
+  }
+
   // ---------- 計算監測 ----------
   // 遊戲把模擬（stepWorker）和正式統計（「計算中」，透過 officialPort 跑在同一個 Worker）放在背景執行緒。
   // 這裡包裝 Worker.prototype.postMessage，只讀取雙方往來的訊息；遊戲載入後才裝上也能運作。
@@ -185,8 +254,13 @@
   function createMonitor() {
     if (window.__MMS_MON__) return window.__MMS_MON__;
     const PIN_KEY = 'mms:monitor-on';
+    const TURBO_KEY = 'mms:monitor-turbo';
     const now = () => performance.now();
-    const S = { duty: null, port: null, turbo: false, seq: null, rounds: 0, startAt: 0, lastAt: 0, gaps: [], done: [], stepOut: new Map(), stepLat: [] };
+    let turbo0 = false;
+    try {
+      turbo0 = localStorage.getItem(TURBO_KEY) === '1';
+    } catch {}
+    const S = { duty: null, port: null, turbo: turbo0, seq: null, rounds: 0, startAt: 0, lastAt: 0, gaps: [], done: [], stepOut: new Map(), stepLat: [] };
     const avg = (a) => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : null);
     const fmt = (ms) => (ms == null ? '—' : ms < 1000 ? Math.round(ms) + ' ms' : (ms / 1000).toFixed(1) + ' 秒');
     // 省電模式會再減半（7.5%／15%／25%／50%），和一般模式的數值重疊，所以只標一般模式的意思
@@ -258,6 +332,9 @@
     let timer = null;
     const setTurbo = (on) => {
       S.turbo = on;
+      try {
+        on ? localStorage.setItem(TURBO_KEY, '1') : localStorage.removeItem(TURBO_KEY);
+      } catch {}
       if (S.port) post.call(S.port, { kind: 'off', msg: { kind: 'budget', duty: on ? 1 : (S.duty ?? 0.5) } });
       render();
     };
@@ -278,7 +355,7 @@
       } else L.push('正式統計：目前沒有在算');
       for (const d of S.done) {
         const at = new Date(d.at).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false });
-        L.push(`  ✔ ${at} 算完：${d.rounds ?? '?'} 回合，運算 ${fmt(d.ms)}／經過 ${fmt(d.wallMs)}`);
+        L.push(`  ✔ ${at} 算完 ${d.rounds ?? '?'} 回合`, `    運算 ${fmt(d.ms)}／經過 ${fmt(d.wallMs)}`);
       }
       L.push(`模擬回應：最近 ${fmt(S.stepLat[S.stepLat.length - 1])}，平均 ${fmt(avg(S.stepLat))}`);
       L.push(`主執行緒延遲：${fmt(jank)}`);
@@ -294,13 +371,14 @@
       host.style.cssText = 'position:fixed;z-index:2147483645;left:12px;top:calc(env(safe-area-inset-top) + 112px);pointer-events:none;';
       const root = host.attachShadow({ mode: 'open' });
       root.innerHTML = `<style>
-  .box { background: rgba(20,22,26,.86); color: #eef1f4; font: 11.5px/1.5 ui-monospace, Menlo, Consolas, monospace; padding: 7px 9px; border-radius: 8px; max-width: min(320px, calc(100vw - 24px)); }
-  .h { display: flex; align-items: center; gap: 8px; font: 600 12px -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif; margin-bottom: 3px; }
+  .box { background: rgba(20,22,26,.86); color: #eef1f4; font: 11.5px/1.5 ui-monospace, Menlo, Consolas, monospace; padding: 7px 9px; border-radius: 8px; box-sizing: border-box; width: min(250px, calc(100vw - 24px)); }
+  .h { pointer-events: auto; cursor: move; user-select: none; -webkit-user-select: none; display: flex; align-items: center; gap: 8px; font: 600 12px -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif; margin-bottom: 3px; }
   .h span { flex: 1; }
   .t { white-space: pre-wrap; }
-  button { pointer-events: auto; font: 12px -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif; border: 0; border-radius: 6px; padding: 2px 8px; cursor: pointer; background: #e8ecf0; color: #1b1f24; }
+  /* 固定寬度：開關加速時文字長度不同也不會讓按鈕位置跑掉 */
+  button { flex: none; width: 5.5em; text-align: center; pointer-events: auto; font: 12px -apple-system, "PingFang TC", "Microsoft JhengHei", sans-serif; border: 0; border-radius: 6px; padding: 2px 8px; cursor: pointer; background: #e8ecf0; color: #1b1f24; }
   button.on { background: #f0a020; }
-</style><div class="box"><div class="h"><span>🚇 計算監測</span><button type="button" title="把背景計算的工作比例固定成 100%；重新整理頁面就恢復遊戲預設">加速計算</button></div><div class="t"></div></div>`;
+</style><div class="box"><div class="h"><span title="按住標題列可拖動">🚇 計算監測</span><button type="button" title="把背景計算的工作比例固定成 100%；設定會記住，重新整理後仍然有效">加速計算</button></div><div class="t"></div></div>`;
       root.querySelector('button').addEventListener('click', (e) => {
         e.stopPropagation();
         setTurbo(!S.turbo);
@@ -314,6 +392,8 @@
       }, 100);
       timer = setInterval(render, 500);
       render();
+      // 內容填好、尺寸確定後再套用記住的位置
+      draggable(host, MON_POS_KEY, root.querySelector('.h'), (e) => e.composedPath()[0]?.closest?.('button'));
     }
 
     function hide() {

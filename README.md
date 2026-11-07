@@ -99,6 +99,8 @@
 
 登入方式和遊戲帳號版書籤相同：讀取遊戲的登入狀態，交給 Worker 驗證後換發本站 token，存在原網站的 `localStorage['mms:token']`。所以要先完成[設定遊戲帳號登入](#7-設定遊戲帳號登入選用)。還沒連上時（遊戲沒登入，或帳號不在 `ALLOWED_ACCOUNTS`）🚇 按鈕會呈半透明，滑鼠移上去會顯示原因，點按鈕會再試一次並跳出錯誤訊息。token 失效時會自動清掉，下次再用遊戲帳號重新換發。
 
+🚇 按鈕可以按住拖到別的位置，避免擋到遊戲介面。位置記在 `localStorage['mms:fab-pos']`，重新整理後保留；視窗變小時會自動移回畫面內。短按仍然是打開面板。
+
 userscript 本身只有十幾行：它在頁面插入 `<script src="https://<你的網域>/inject.js?mode=auto">`，同步程式每次都從你的網域載入最新版，所以更新功能不用重裝 userscript。腳本裡不含任何登入資訊，網址也是 Worker 依照目前網域產生的。
 
 同時裝了 userscript 又點書籤也沒關係，書籤只會開關面板，不會重複啟動自動儲存。
@@ -173,7 +175,7 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 
 **固定顯示計算監測面板**（勾選框，設定存在 `localStorage['mms:monitor-on']`，每個網域分開，預設關閉）
 
-勾選後，🚇 按鈕下方會常駐一個小面板，重新整理後也會自動顯示：
+勾選後，🚇 按鈕下方會常駐一個小面板，重新整理後也會自動顯示。按住面板的標題列可以拖動，位置記在 `localStorage['mms:monitor-pos']`：
 
 | 欄位 | 意思 |
 |---|---|
@@ -185,7 +187,7 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 
 原理：遊戲把模擬（`stepWorker`）和正式統計（透過 `officialPort` 跑在同一個 Worker）放在背景執行緒。程式包裝 `Worker.prototype.postMessage`，在 `inject.js` 一啟動就裝上，所以勾選前的進度也記得到；遊戲已經建立的 Worker 也能攔截到。
 
-**加速計算**：監測面板上的按鈕。把遊戲送給背景執行緒的工作比例（`budget.duty`）固定成 1，正式統計會快一些，但仍比把分頁切到背景慢（背景時遊戲會暫停模擬）。重新整理頁面就恢復遊戲預設。
+**加速計算**：監測面板上的按鈕。把遊戲送給背景執行緒的工作比例（`budget.duty`）固定成 1，正式統計會快一些，但仍比把分頁切到背景慢（背景時遊戲會暫停模擬）。設定記在 `localStorage['mms:monitor-turbo']`（`'1'` = 開啟），重新整理後仍然有效；即使沒有顯示監測面板也會套用，要關閉時勾選面板再按「關閉加速」。
 
 實測（無頭 Chromium、795 站 48 線的計劃）：
 
@@ -593,13 +595,15 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | 上次自動儲存時間 key | `mms:autosave-last` | |
 | keepalive 門檻 | 60,000 字元 | |
 | 面板列表 | 最多 50 筆；每筆有「選計劃」（單一計劃匯入）和「載入」（整份載入） | |
-| 🚇 按鈕 | `left:12px; top: safe-area + 64px`，40×40px，`z-index: 2147483646` | |
+| 🚇 按鈕 | 預設 `left:12px; top: safe-area + 64px`，40×40px，`z-index: 2147483646`；可拖動 | 移動超過 5px 才算拖動 |
+| 🚇 按鈕位置 key | `mms:fab-pos` | `{x,y}`（px），套用時夾在視窗內 |
 | 面板 | 最大寬度 420px，`z-index: 2147483647`，使用 Shadow DOM 隔離樣式；攔截 keydown/keyup/keypress/wheel，避免觸發遊戲快捷鍵 | |
 | 面板來源標籤 | `auto-save` 自動儲存、`auto-backup` 匯入前備份 | |
 | 計算監測開關 key | `mms:monitor-on` | `'1'` = 固定顯示 |
-| 計算監測面板 | `left:12px; top: safe-area + 112px`，`z-index: 2147483645`，每 500ms 更新；只有按鈕可點，其他區域不擋遊戲操作 | |
+| 計算監測面板 | 預設 `left:12px; top: safe-area + 112px`，固定寬度 250px（按鈕位置不隨內容移動），`z-index: 2147483645`，每 500ms 更新；只有標題列（拖動）和按鈕可互動，其他區域不擋遊戲操作 | |
+| 計算監測位置 key | `mms:monitor-pos` | `{x,y}`（px） |
 | 「可能卡住」門檻 | 距上次進度超過 60 秒，且超過每回合平均時間的 6 倍 | |
-| 加速計算 | 把 `budget.duty` 改成 1，不存檔，重新整理就恢復 | |
+| 加速計算 | 把 `budget.duty` 改成 1 | 開關 key `mms:monitor-turbo`，`'1'` = 開啟 |
 
 ### `public/index.html`
 
@@ -765,6 +769,9 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
 | `mms:device` | 任一 | 選填，自訂裝置名稱 |
 | `mms:unlock-all` | 你的網域、原網站 | 選填，`'1'` 開啟「解鎖全部功能」（預設關閉）；開啟後本機存檔/自動儲存補 `owned:true` |
 | `mms:monitor-on` | 你的網域、原網站 | 選填，`'1'` 固定顯示計算監測面板（預設關閉） |
+| `mms:monitor-turbo` | 你的網域、原網站 | 選填，`'1'` 開啟加速計算（預設關閉） |
+| `mms:fab-pos` | 你的網域、原網站 | 🚇 按鈕拖動後的位置 `{x,y}` |
+| `mms:monitor-pos` | 你的網域、原網站 | 計算監測面板拖動後的位置 `{x,y}` |
 
 ---
 
