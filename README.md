@@ -58,7 +58,7 @@
             ├─ /api/*   → 存檔 API（R2：SAVES）
             ├─ /play/*  → 轉接 GAME_ORIGIN，插入 core.js + inject.js
             ├─ /mms.user.js → 產生原網站用的 userscript（載入 inject.js?mode=auto）
-            └─ 其他     → 靜態檔案（public/：管理介面、core.js、inject.js）
+            └─ 其他     → 靜態檔案（public/：管理介面、core.js、inject.js、history.js）
 ```
 
 ---
@@ -338,6 +338,23 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 
 - **還原成新存檔**：把那個版本複製成一筆新的存檔（來源標籤「從歷史版本還原」，名稱是「原名稱（時間 版本）」），原本的自動儲存和其他版本都不變。之後就能像一般存檔一樣載入到我的網域版、匯入到原網站或下載。
 - **下載**：下載那個版本的 JSON，格式和一般存檔的下載相同。
+
+### 成長圖表與版本比較
+
+展開「歷史版本」時，列表上方有兩個工具（`public/history.js`）：
+
+**成長圖表**：選一份計劃，畫出日運量、車站數、路線數隨時間的變化（三個小圖共用時間軸）。資料點是每個歷史版本加上目前的雲端存檔。滑過圖表（或聚焦後按左右方向鍵）可以看每個版本的時間、裝置和三個數字；點一下就把那個版本設成比較的舊版本。「數值表」列出同樣的數字。某個版本沒有這份計劃時，線會斷開。
+
+**版本比較**：選兩個版本（預設是最近一個歷史版本 → 目前），一律由舊比到新：
+
+| 區塊 | 內容 | 資料來源 |
+|---|---|---|
+| 摘要表 | 每份計劃的日運量、車站數、路線數，舊 → 新與增減；新增或移除的計劃 | 版本 metadata 的摘要，不用下載 |
+| 路線與車站 | 每份有變動的計劃：新增／移除／改名的路線、停靠站數變化、列車數變化、新增／移除／改名的車站 | 下載兩個版本的內容，解開各計劃的 `psave`（`gz1:` 開頭是 gzip＋base64） |
+
+**計劃怎麼對應**：用「城市＋計劃 id」，不用計劃編號。編號是遊戲計劃清單裡的順序，刪除或移動計劃後，同一個編號在不同版本會是不同的計劃。摘要從這版開始帶計劃 id（`summary.slots[].i`）；之前存的版本沒有 id，第一次打開時會下載那些版本的內容在瀏覽器重新解析，結果快取在 `localStorage['mms:vsum1:<存檔 id>:<版本 id>']`（版本內容不會變，所以不用更新）。舊版的 `save~N` 計劃透過 `planmove` 對應到升級後的 id。
+
+已知狀況：遊戲有時會把挑戰的摘要數字寫進計劃摘要（例如計劃的日運量變成和挑戰一樣的 4,549），圖表會照實畫出這個落差。
 
 ---
 
@@ -706,7 +723,7 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
   "keyCount": 14,
   "summary": {
     "city": "taipei",
-    "slots": [{ "c": "taipei", "p": 1, "st": 12, "l": 3, "r": 45678 }]
+    "slots": [{ "c": "taipei", "p": 1, "i": "Tdl0J45Q1LA1dAuUqdXd", "st": 12, "l": 3, "r": 45678 }]
   }
 }
 ```
@@ -719,7 +736,9 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
 | `size` | R2 物件大小（bytes） |
 | `summary.slots[].c` | 城市代碼 |
 | `summary.slots[].p` | 計劃編號（數字，`planlist` 裡的順序，從 1 開始；不在清單裡是 `"?"`；舊版存檔是 `~N` 的 N），或挑戰 `q:<代碼>` |
+| `summary.slots[].i` | 計劃 id（第 5 版計劃 `psave.<id>` 的 id；挑戰和舊版計劃沒有）。這個欄位加入前存的摘要沒有 |
 | `summary.slots[].st` / `l` / `r` | 車站數 / 路線數 / 日運量 |
+| `summary` 大小 | JSON 超過 1200 字元時，從站數最少的計劃開始捨棄（R2 customMetadata 合計上限 2KB） |
 
 ### Version（歷史版本資訊）
 
@@ -772,6 +791,7 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
 | `mms:monitor-turbo` | 你的網域、原網站 | 選填，`'1'` 開啟加速計算（預設關閉） |
 | `mms:fab-pos` | 你的網域、原網站 | 🚇 按鈕拖動後的位置 `{x,y}` |
 | `mms:monitor-pos` | 你的網域、原網站 | 計算監測面板拖動後的位置 `{x,y}` |
+| `mms:vsum1:<存檔 id>:<版本 id>` | 你的網域（管理介面） | 沒有計劃 id 的舊歷史版本重新解析後的摘要快取（成長圖表用） |
 
 ---
 
@@ -866,6 +886,7 @@ metro-master-sync/
 ├─ public/                      # 靜態檔（ASSETS）
 │  ├─ index.html                # 管理介面
 │  ├─ core.js                   # 共用：讀寫 localStorage、凍結寫入、雜湊、API client
+│  ├─ history.js                # 管理介面：成長圖表與版本比較
 │  └─ inject.js                 # 遊戲頁上的 🚇 面板、自動儲存、略過下載 App 對話框
 └─ .github/workflows/deploy.yml # push 到 main 時自動部署
 ```

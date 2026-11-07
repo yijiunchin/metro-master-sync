@@ -10,9 +10,10 @@
   :root {
     --bg: #f6f5f0; --card: #fff; --fg: #1b1f24; --muted: #6a737d; --line: #e3e6ea;
     --accent: #1a73e8; --accent-fg: #fff; --btn: #e8ecf0; --danger: #d1242f; --warn-bg: #fff4ce; --warn-fg: #5c4400;
+    --series: #1a73e8; --up: #116329; --down: #d1242f;
   }
   @media (prefers-color-scheme: dark) {
-    :root { --bg: #101418; --card: #1c2128; --fg: #e6edf3; --muted: #8b949e; --line: #30363d; --btn: #2d333b; --warn-bg: #3b2e00; --warn-fg: #f2cc60; }
+    :root { --bg: #101418; --card: #1c2128; --fg: #e6edf3; --muted: #8b949e; --line: #30363d; --btn: #2d333b; --warn-bg: #3b2e00; --warn-fg: #f2cc60; --series: #4593f0; --up: #3fb950; --down: #f85149; }
   }
   * { box-sizing: border-box; }
   body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", sans-serif; }
@@ -67,6 +68,38 @@
   .actions { display: flex; flex-wrap: wrap; gap: 6px; }
   .pending { background: var(--warn-bg); color: var(--warn-fg); border-radius: 12px; padding: 12px 14px; margin-bottom: 16px; }
   .section-label { font-size: 13px; font-weight: 600; color: var(--muted); margin: 14px 0 2px; }
+  /* 成長圖表與版本比較（history.js） */
+  .hist { margin: 4px 0 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+  .hist-h { font-size: 13px; font-weight: 600; margin: 10px 0 6px; }
+  .hist-bar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; font-size: 13px; }
+  .hist-bar select { font: inherit; font-size: 13px; padding: 5px 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--bg); color: var(--fg); max-width: 100%; }
+  .hist-bar button { font-size: 13px; padding: 5px 12px; background: var(--bg); }
+  .hc-wrap { position: relative; }
+  .hc { display: block; outline: none; touch-action: pan-y; }
+  .hc:focus-visible { outline: 2px solid var(--series); outline-offset: 2px; border-radius: 4px; }
+  .hc-title { font-size: 12px; font-weight: 600; fill: var(--fg); }
+  .hc-tick { font-size: 11px; fill: var(--muted); font-variant-numeric: tabular-nums; }
+  .hc-end { font-size: 12px; fill: var(--fg); font-weight: 600; font-variant-numeric: tabular-nums; }
+  .hc-grid { stroke: var(--line); stroke-width: 1; }
+  .hc-line { fill: none; stroke: var(--series); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .hc-dot { fill: var(--series); stroke: var(--btn); stroke-width: 2; }
+  .hc-cross { stroke: var(--muted); stroke-width: 1; }
+  .hc-tip { position: absolute; z-index: 1; pointer-events: none; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; font-size: 12px; box-shadow: 0 4px 14px rgba(0,0,0,.15); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .hc-tip-h { color: var(--muted); margin-bottom: 2px; }
+  .hc-details { margin-top: 6px; font-size: 13px; }
+  .hc-details summary { font-weight: 400; color: var(--muted); }
+  .hc-table { overflow-x: auto; margin-top: 6px; }
+  .hc-table table { border-collapse: collapse; font-size: 12px; width: 100%; font-variant-numeric: tabular-nums; }
+  .hc-table th, .hc-table td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  .hc-table th { color: var(--muted); font-weight: 600; }
+  .hc-table .num { text-align: right; }
+  .d-up, .d-add { color: var(--up); font-weight: 600; }
+  .d-down, .d-del { color: var(--down); font-weight: 600; }
+  .d-chg { font-weight: 600; }
+  .h-detail .cd { font-size: 13px; padding: 6px 0; border-top: 1px solid var(--line); }
+  .h-detail .cd:first-child { border-top: 0; }
+  .h-detail ul { margin: 4px 0 0; padding-left: 18px; }
+  .h-detail li { margin: 2px 0; word-break: break-word; }
   #toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: #24292f; color: #fff; padding: 9px 16px; border-radius: 10px; font-size: 14px; opacity: 0; transition: opacity .2s; pointer-events: none; max-width: calc(100% - 32px); }
   #toast.show { opacity: 1; }
 </style>
@@ -182,6 +215,7 @@
 <div id="toast"></div>
 
 <script src="/core.js"></script>
+<script src="/history.js"></script>
 <script>
 (() => {
   const GAME = 'https://metromaster.huangyouci.com/';
@@ -265,7 +299,7 @@
     box.innerHTML = '<div class="muted">載入中…</div>';
     const { versions } = await api('/api/snapshots/' + s.id + '/versions');
     box.innerHTML = versions.length
-      ? `<div class="muted" style="margin-bottom:4px">每次自動儲存覆寫前都會保留舊版：2 小時內每 15 分鐘、24 小時內每小時、30 天內每天、180 天內每週各一份。還原會另存成一筆新存檔，不影響這筆自動儲存。</div>` +
+      ? `<div class="hist"></div><div class="muted" style="margin-bottom:4px">每次自動儲存覆寫前都會保留舊版：2 小時內每 15 分鐘、24 小時內每小時、30 天內每天、180 天內每週各一份。還原會另存成一筆新存檔，不影響這筆自動儲存。</div>` +
         versions.map((v) => `<div class="ver" data-vid="${esc(v.vid)}">
           <div class="info">${fmtTime(v.at)}・${esc(v.device || '未知裝置')}・${fmtSize(v.size)}
             <div class="muted">${v.summary?.slots?.length ? slotsText(v.summary.slots.slice(0, 3)) : v.keyCount + ' 個存檔項目'}</div></div>
@@ -273,6 +307,11 @@
           <button data-vact="download">下載</button>
         </div>`).join('')
       : '<div class="muted">還沒有歷史版本。自動儲存下一次更新這筆存檔時，就會保留目前的內容。</div>';
+    // 有歷史版本時，在列表上方畫成長圖表、提供版本比較（versions 加上目前的存檔至少兩個資料點）
+    if (versions.length) {
+      const hist = box.querySelector('.hist');
+      window.MMSHistory.render(hist, s, versions, api).catch((err) => (hist.textContent = '成長圖表載入失敗：' + err.message));
+    }
   }
 
   async function versionAction(btn) {

@@ -414,6 +414,8 @@ function summarize(keys) {
       slots.push({
         c: city,
         p: m[3] ? 'q:' + m[3] : m[2] ? planIndex(city, m[2]) : Number(m[1] || 1),
+        // 計劃 id：編號會因刪除、移動計劃而改變，管理介面的成長圖表用 id 辨識同一份計劃
+        ...(m[2] ? { i: m[2] } : {}),
         st: s.stations | 0,
         l: s.lines | 0,
         r: Math.round(s.riders || 0),
@@ -428,6 +430,18 @@ function summarize(keys) {
 }
 
 const clip = (s, n) => String(s ?? '').slice(0, n);
+// 摘要存在 R2 customMetadata（全部欄位合計上限 2KB），超過 SUMMARY_MAX 就從站數最少的計劃開始捨棄，
+// 不直接截斷字串，避免存進壞掉的 JSON
+const SUMMARY_MAX = 1200;
+function summaryJson(keys) {
+  const s = summarize(keys);
+  let out = JSON.stringify(s);
+  while (out.length > SUMMARY_MAX && s.slots.length) {
+    s.slots.pop();
+    out = JSON.stringify(s);
+  }
+  return out;
+}
 // 內容版本：新建是 1，每次覆寫內容 +1；改名、釘選不變。這個功能之前建立的存檔沒有，視為 0
 const revOf = (m) => Number(m?.rev) || 0;
 // R2 條件寫入失敗（物件剛被別的請求改過）時重試的次數
@@ -471,7 +485,6 @@ async function createSnapshot(request, env) {
   const data = validateData(body.data);
   const now = Date.now();
   const id = now.toString(36) + '-' + crypto.randomUUID().slice(0, 8);
-  const summary = summarize(data.keys);
   const meta = {
     name: clip(body.name, 80),
     device: clip(body.device, 60),
@@ -481,7 +494,7 @@ async function createSnapshot(request, env) {
     pinned: body.pinned ? '1' : '0',
     rev: '1',
     keyCount: String(Object.keys(data.keys).length),
-    summary: JSON.stringify(summary).slice(0, 1200),
+    summary: summaryJson(data.keys),
   };
   const text = JSON.stringify(data);
   const obj = await env.SAVES.put(PREFIX + id, text, {
@@ -513,7 +526,7 @@ async function replaceSnapshot(request, env, id) {
       rev: String(rev + 1),
       updatedAt: String(Date.now()),
       keyCount: String(Object.keys(data.keys).length),
-      summary: JSON.stringify(summarize(data.keys)).slice(0, 1200),
+      summary: summaryJson(data.keys),
     };
     if (typeof body.name === 'string') meta.name = clip(body.name, 80);
     if (typeof body.device === 'string') meta.device = clip(body.device, 60);
