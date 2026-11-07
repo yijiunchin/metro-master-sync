@@ -580,7 +580,8 @@
             break;
           }
           C.applyUnlockAll(r.data);
-          await api('/api/snapshots/' + id, { method: 'PUT', body: JSON.stringify({ data: r.data }) });
+          // 帶上讀到的版本：這段時間被自動儲存更新過就不覆寫
+          await api('/api/snapshots/' + id, { method: 'PUT', body: JSON.stringify({ data: r.data, baseRev: r.snapshot.rev }) });
           await refresh();
           toast('已補上全部解鎖（計劃 4/5・自訂顏色・區間 3）');
           break;

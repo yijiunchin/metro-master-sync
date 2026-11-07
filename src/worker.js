@@ -428,6 +428,10 @@ function summarize(keys) {
 }
 
 const clip = (s, n) => String(s ?? '').slice(0, n);
+// 內容版本：新建是 1，每次覆寫內容 +1；改名、釘選不變。這個功能之前建立的存檔沒有，視為 0
+const revOf = (m) => Number(m?.rev) || 0;
+// R2 條件寫入失敗（物件剛被別的請求改過）時重試的次數
+const WRITE_RETRIES = 3;
 
 function toMeta(obj) {
   const m = obj.customMetadata || {};
@@ -443,6 +447,7 @@ function toMeta(obj) {
     createdAt: Number(m.createdAt) || obj.uploaded?.getTime() || 0,
     updatedAt: Number(m.updatedAt) || Number(m.createdAt) || obj.uploaded?.getTime() || 0,
     pinned: m.pinned === '1',
+    rev: revOf(m),
     size: obj.size,
     keyCount: Number(m.keyCount) || 0,
     summary,
@@ -474,6 +479,7 @@ async function createSnapshot(request, env) {
     createdAt: String(now),
     updatedAt: String(now),
     pinned: body.pinned ? '1' : '0',
+    rev: '1',
     keyCount: String(Object.keys(data.keys).length),
     summary: JSON.stringify(summary).slice(0, 1200),
   };
@@ -485,26 +491,40 @@ async function createSnapshot(request, env) {
   return json({ snapshot: toMeta({ key: PREFIX + id, size: obj.size, customMetadata: meta }) }, 201);
 }
 
-// 覆寫存檔內容（自動儲存用），保留建立時間、來源與釘選
+// 覆寫存檔內容（自動儲存用），保留建立時間、來源與釘選。
+// 帶 baseRev 時，雲端版本不同就回 409，不覆寫（避免兩台裝置互相蓋掉）；沒帶時照舊直接覆寫。
+// 寫入用 etag 條件寫入，讀取到寫入之間被別的請求改過就重讀再試。
 async function replaceSnapshot(request, env, id) {
   const body = await readJson(request);
   const data = validateData(body.data);
-  const old = await env.SAVES.get(PREFIX + id);
-  if (!old) throw new HttpError(404, '找不到這個存檔');
-  await archiveVersion(env, id, old);
-  const meta = {
-    ...old.customMetadata,
-    updatedAt: String(Date.now()),
-    keyCount: String(Object.keys(data.keys).length),
-    summary: JSON.stringify(summarize(data.keys)).slice(0, 1200),
-  };
-  if (typeof body.name === 'string') meta.name = clip(body.name, 80);
-  if (typeof body.device === 'string') meta.device = clip(body.device, 60);
-  const obj = await env.SAVES.put(PREFIX + id, JSON.stringify(data), {
-    httpMetadata: { contentType: 'application/json' },
-    customMetadata: meta,
-  });
-  return json({ snapshot: toMeta({ key: PREFIX + id, size: obj.size, customMetadata: meta }) });
+  const text = JSON.stringify(data);
+  const checkRev = body.baseRev !== undefined && body.baseRev !== null;
+  for (let i = 0; i < WRITE_RETRIES; i++) {
+    const old = await env.SAVES.get(PREFIX + id);
+    if (!old) throw new HttpError(404, '找不到這個存檔');
+    const rev = revOf(old.customMetadata);
+    if (checkRev && Number(body.baseRev) !== rev) {
+      await old.arrayBuffer();
+      return json({ error: '雲端存檔已被其他裝置更新', conflict: true, snapshot: toMeta(old) }, 409);
+    }
+    await archiveVersion(env, id, old);
+    const meta = {
+      ...old.customMetadata,
+      rev: String(rev + 1),
+      updatedAt: String(Date.now()),
+      keyCount: String(Object.keys(data.keys).length),
+      summary: JSON.stringify(summarize(data.keys)).slice(0, 1200),
+    };
+    if (typeof body.name === 'string') meta.name = clip(body.name, 80);
+    if (typeof body.device === 'string') meta.device = clip(body.device, 60);
+    const obj = await env.SAVES.put(PREFIX + id, text, {
+      onlyIf: { etagMatches: old.etag },
+      httpMetadata: { contentType: 'application/json' },
+      customMetadata: meta,
+    });
+    if (obj) return json({ snapshot: toMeta({ key: PREFIX + id, size: obj.size, customMetadata: meta }) });
+  }
+  throw new HttpError(409, '雲端存檔正在被其他裝置更新，請稍後再試');
 }
 
 // ---------- 歷史版本 ----------
@@ -616,6 +636,7 @@ async function restoreVersion(request, env, id, vid) {
     createdAt: String(now),
     updatedAt: String(now),
     pinned: '0',
+    rev: '1',
     keyCount: obj.customMetadata?.keyCount || '0',
     summary: obj.customMetadata?.summary || '',
   };
@@ -635,17 +656,21 @@ async function getSnapshot(env, id) {
 
 async function updateSnapshot(request, env, id) {
   const body = await readJson(request);
-  const obj = await env.SAVES.get(PREFIX + id);
-  if (!obj) throw new HttpError(404, '找不到這個存檔');
-  const meta = { ...obj.customMetadata };
-  if (typeof body.name === 'string') meta.name = clip(body.name, 80);
-  if (typeof body.pinned === 'boolean') meta.pinned = body.pinned ? '1' : '0';
-  // R2 無法單獨改 metadata，只能連內容一起重寫
-  const saved = await env.SAVES.put(PREFIX + id, await obj.arrayBuffer(), {
-    httpMetadata: obj.httpMetadata,
-    customMetadata: meta,
-  });
-  return json({ snapshot: toMeta({ key: PREFIX + id, size: saved.size, customMetadata: meta }) });
+  // R2 無法單獨改 metadata，只能連內容一起重寫；用條件寫入，避免把同時寫入的新內容蓋回舊的
+  for (let i = 0; i < WRITE_RETRIES; i++) {
+    const obj = await env.SAVES.get(PREFIX + id);
+    if (!obj) throw new HttpError(404, '找不到這個存檔');
+    const meta = { ...obj.customMetadata };
+    if (typeof body.name === 'string') meta.name = clip(body.name, 80);
+    if (typeof body.pinned === 'boolean') meta.pinned = body.pinned ? '1' : '0';
+    const saved = await env.SAVES.put(PREFIX + id, await obj.arrayBuffer(), {
+      onlyIf: { etagMatches: obj.etag },
+      httpMetadata: obj.httpMetadata,
+      customMetadata: meta,
+    });
+    if (saved) return json({ snapshot: toMeta({ key: PREFIX + id, size: saved.size, customMetadata: meta }) });
+  }
+  throw new HttpError(409, '存檔正在被其他裝置更新，請稍後再試');
 }
 
 async function readPending(env) {

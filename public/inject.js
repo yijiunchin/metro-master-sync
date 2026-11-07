@@ -147,9 +147,19 @@
       // 還沒登入時按鈕半透明，提示需要先在遊戲裡登入帳號
       const mark = () => {
         const ok = onPlay || !!getToken();
+        const conflict = auto.conflict();
         fab.style.opacity = ok ? '1' : '.55';
-        fab.title = ok ? '存檔同步' : '存檔同步（尚未登入：' + (loginError || '請在遊戲裡登入帳號') + '）';
+        fab.textContent = conflict ? '⚠️' : '🚇';
+        fab.style.boxShadow = conflict ? '0 0 0 3px #f0a020, 0 2px 10px rgba(0,0,0,.25)' : '0 2px 10px rgba(0,0,0,.25)';
+        fab.title = conflict
+          ? '存檔同步：' + auto.conflictText(conflict) + '，點開處理'
+          : ok
+            ? '存檔同步'
+            : '存檔同步（尚未登入：' + (loginError || '請在遊戲裡登入帳號') + '）';
       };
+      auto.onChange(mark);
+      // 其他分頁（同網域）發現衝突或處理完時也跟著更新
+      window.addEventListener('storage', (e) => e.key === C.CONFLICT_KEY && mark());
       mark();
       ensureLogin().then(mark);
       document.addEventListener('visibilitychange', () => !document.hidden && !getToken() && ensureLogin().then(mark));
@@ -387,6 +397,7 @@
 
   // 自動儲存：進度有變動時定期上傳，切到背景時也存一次。
   // 一直更新同一筆 source=auto-save 的雲端存檔，不會每次新增。
+  // 上傳時帶上這台最後同步到的版本（baseRev）；雲端已被別台更新就不覆寫，暫停自動儲存並提醒。
   function createAutoSave(C, getToken, onUnauthorized) {
     const ON_KEY = 'mms:autosave-on';
     const LAST_KEY = 'mms:autosave-last';
@@ -394,6 +405,19 @@
     const api = C.createApi(API, getToken, onUnauthorized);
     const listeners = new Set();
     let running = null;
+
+    const readConflict = () => {
+      try {
+        const c = JSON.parse(C.get(C.CONFLICT_KEY));
+        // 只算目前自動儲存那一筆的衝突
+        return c && c.id === C.get(C.AUTOSAVE_ID_KEY) ? c : null;
+      } catch {
+        return null;
+      }
+    };
+    const setRev = (snap) => C.set(C.AUTOSAVE_REV_KEY, Number.isFinite(snap?.rev) ? String(snap.rev) : null);
+    const conflictText = (c) =>
+      `雲端已被「${c.device || '其他裝置'}」在 ${new Date(c.updatedAt).toLocaleString('zh-TW', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })} 更新，已暫停自動儲存`;
 
     const auto = {
       enabled: () => C.get(ON_KEY) !== '0',
@@ -404,27 +428,73 @@
       },
       lastAt: () => Number(C.get(LAST_KEY)) || 0,
       error: null,
+      conflict: readConflict,
+      conflictText,
       onChange: (fn) => (listeners.add(fn), () => listeners.delete(fn)),
       run: () => (running ??= save().finally(() => (running = null))),
+      // 解決衝突：'overwrite' 用這台的進度覆蓋雲端；'fork' 另存成一筆新的自動儲存，之後改更新它。
+      // 「載入雲端版本」由面板走一般的載入流程（會先備份這台的進度）。
+      async resolve(action) {
+        const c = readConflict();
+        if (!c) return;
+        C.flushGame();
+        const data = readGame(C);
+        const body = { name: C.current()?.name || '', device: C.device(), data };
+        let res;
+        if (action === 'overwrite') {
+          // 以剛才看到的雲端版本為基準；這段時間又被更新的話會再次提醒
+          res = await api('/api/snapshots/' + c.id, { method: 'PUT', body: JSON.stringify({ ...body, baseRev: c.rev }) }).catch((err) => {
+            if (err.status === 409 && err.body?.conflict) {
+              storeConflict(err.body.snapshot);
+              throw new Error(conflictText(readConflict()));
+            }
+            throw err;
+          });
+        } else if (action === 'fork') {
+          const name = (body.name || '自動儲存') + '（' + C.device() + '）';
+          res = await api('/api/snapshots', { method: 'POST', body: JSON.stringify({ ...body, name, source: 'auto-save' }) });
+          C.set(C.AUTOSAVE_ID_KEY, res.snapshot.id);
+          C.setCurrent(res.snapshot);
+        } else return;
+        setRev(res.snapshot);
+        C.set(C.CONFLICT_KEY, null);
+        C.set(C.AUTOSAVE_HASH_KEY, C.hashData(data));
+        C.set(LAST_KEY, String(Date.now()));
+        auto.error = null;
+        notify();
+      },
     };
     const notify = () => listeners.forEach((fn) => fn());
+    const storeConflict = (snap) =>
+      C.set(C.CONFLICT_KEY, JSON.stringify({ id: snap.id, name: snap.name, rev: snap.rev, device: snap.device, updatedAt: snap.updatedAt }));
 
     async function save() {
       if (!auto.enabled() || C.isFrozen() || !getToken()) return;
+      const c = readConflict();
+      if (c) {
+        auto.error = conflictText(c);
+        return notify();
+      }
       const data = readGame(C);
       if (!C.hasProgress(data)) return;
       const hash = C.hashData(data);
       if (hash === C.get(C.AUTOSAVE_HASH_KEY)) return;
       const body = { name: C.current()?.name || '', device: C.device(), data };
-      const text = JSON.stringify(body);
       // 頁面關閉時仍要送出；keepalive 有 64KB 上限
-      const keepalive = text.length < 60000;
+      const keepalive = JSON.stringify(body).length < 60000;
       try {
         let res = null;
         const id = C.get(C.AUTOSAVE_ID_KEY);
         if (id) {
-          res = await api('/api/snapshots/' + id, { method: 'PUT', body: text, keepalive }).catch((err) => {
-            if (/找不到/.test(err.message)) return null; // 已被刪除就另開一筆
+          // 沒有記錄版本（這個功能之前就開始的自動儲存）時不帶 baseRev，第一次照舊覆寫並記下版本
+          const rev = C.get(C.AUTOSAVE_REV_KEY);
+          const put = rev == null ? body : { ...body, baseRev: Number(rev) };
+          res = await api('/api/snapshots/' + id, { method: 'PUT', body: JSON.stringify(put), keepalive }).catch((err) => {
+            if (err.status === 404) return null; // 已被刪除就另開一筆
+            if (err.status === 409 && err.body?.conflict) {
+              storeConflict(err.body.snapshot);
+              throw new Error(conflictText(readConflict()));
+            }
             throw err;
           });
         }
@@ -438,6 +508,7 @@
         }
         // 匯入進行中就不記錄，避免把舊進度當成已儲存
         if (C.isFrozen()) return;
+        setRev(res.snapshot);
         C.set(C.AUTOSAVE_HASH_KEY, hash);
         C.set(LAST_KEY, String(Date.now()));
         auto.error = null;
@@ -493,6 +564,8 @@
   input { flex: 1; min-width: 0; font: inherit; font-size: 16px; padding: 7px 10px; border: 1px solid #cfd6dd; border-radius: 8px; }
   .pending { background: #fff4ce; color: #5c4400; border-radius: 10px; padding: 10px 12px; margin-bottom: 10px; display: flex; gap: 8px; align-items: center; }
   .pending span { flex: 1; }
+  .conflict { background: #fff1e0; color: #6b3a00; border-radius: 10px; padding: 10px 12px; margin-top: 10px; font-size: 13px; line-height: 1.5; }
+  .conflict .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
   .item { display: flex; gap: 10px; align-items: center; padding: 9px 0; border-bottom: 1px solid #eef0f2; }
   .item .info { flex: 1; min-width: 0; }
   .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -540,6 +613,7 @@
     <label class="unlock"><input type="checkbox" id="monitor" /> 固定顯示計算監測面板</label>
     <div class="tools"><button data-act="board">排行榜檢查</button></div>
     <div id="board" class="board" hidden></div>
+    <div id="conflict"></div>
     <div class="status" id="status"></div>
     <div id="pending"></div>
     <div id="picker" class="picker" hidden></div>
@@ -698,6 +772,17 @@
           if (!box.hidden) renderBoard(box);
         } else if (act === 'board-refresh') {
           renderBoard($('#board'));
+        } else if (act === 'conflict-fork') {
+          setStatus('另存中…');
+          await auto.resolve('fork');
+          setStatus('✓ 已另存成新的自動儲存，之後會更新這一筆');
+          await refresh();
+        } else if (act === 'conflict-overwrite') {
+          if (!confirm('要用這台裝置的進度覆蓋雲端嗎？\n另一台裝置上傳的版本會被蓋掉（仍可從管理介面的「歷史版本」找回）。')) return;
+          setStatus('覆蓋中…');
+          await auto.resolve('overwrite');
+          setStatus('✓ 已用這台的進度覆蓋雲端，恢復自動儲存');
+          await refresh();
         } else if (act === 'clear-pending') {
           await api('/api/pending', { method: 'DELETE' });
           pending = null;
@@ -759,10 +844,22 @@
       const box = $('#auto');
       const renderAuto = () => {
         if (!host.isConnected) return off();
+        const c = auto.conflict();
+        $('#conflict').innerHTML = c
+          ? `<div class="conflict"><b>⚠️ ${esc(auto.conflictText(c))}</b><br>這台裝置的進度還沒上傳，要怎麼處理？
+            <div class="acts">
+              <button class="primary" data-act="load" data-id="${esc(c.id)}">載入雲端版本</button>
+              <button data-act="conflict-fork">另存成新存檔</button>
+              <button data-act="conflict-overwrite">仍然覆蓋</button>
+            </div>
+            <div class="muted">載入雲端版本前，會先把這台的進度備份成「匯入前自動備份」。</div></div>`
+          : '';
         box.checked = auto.enabled();
         const last = auto.lastAt();
-        $('#auto-state').textContent = auto.error
-          ? '失敗：' + auto.error
+        $('#auto-state').textContent = c
+          ? '已暫停（雲端有衝突）'
+          : auto.error
+            ? '失敗：' + auto.error
           : auto.enabled() && last
             ? '上次 ' + new Date(last).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit', hour12: false })
             : '';

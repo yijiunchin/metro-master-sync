@@ -284,18 +284,41 @@ token 直接帶在書籤裡，不靠第三方 Cookie，所以 Safari 的追蹤�
 | 開關位置 | 🚇 面板的「自動儲存」勾選框 |
 | 開關儲存位置 | `localStorage['mms:autosave-on']`（`'0'` = 關閉，其他值或沒有設定 = 開啟），每台裝置、每個瀏覽器、每個網域分開 |
 | 觸發時機 | 頁面在前景時每 **30 秒**一次；切到背景（`visibilitychange` → hidden，等遊戲自己寫完再讀）；關閉頁面（`pagehide`） |
-| 跳過條件 | 已關閉、正在匯入（寫入被凍結）、沒有登入 token、沒有遊戲進度、進度雜湊和上次相同 |
+| 跳過條件 | 已關閉、正在匯入（寫入被凍結）、沒有登入 token、雲端有未處理的衝突、沒有遊戲進度、進度雜湊和上次相同 |
 | 頁面關閉時 | 請求內容小於 **60,000** 字元時使用 `fetch(..., {keepalive:true})`，確保頁面關掉後仍會送出（瀏覽器的 keepalive 上限是 64KB） |
 | 雜湊 | FNV-1a 32-bit，先把 key 排序，所以和 key 順序無關；格式 `<長度>:<base36>` |
 
 **一直更新同一筆存檔**，不會每次新增一筆：
 
 - 第一次自動儲存時新增一筆 `source=auto-save` 的存檔，id 記在 `mms:autosave-id`，之後都用 `PUT /api/snapshots/:id` 覆寫。
-- 那筆被刪掉時（API 回「找不到」），會自動再新增一筆。
+- 那筆被刪掉時（API 回 `404`），會自動再新增一筆。
 - **載入自動儲存的存檔**：接續更新那一筆。所以手機玩到一半，到電腦載入同一筆繼續玩，兩邊更新的都是同一筆。
 - **載入手動存檔或其他存檔**：清除 `mms:autosave-id`。之後有變動時另外新增一筆同名的自動儲存，原本的存檔保持不變。
 - 剛載入時會記下存檔的雜湊，所以只是載入、沒有變動，不會馬上多出一筆自動儲存。
 - 自動儲存的名稱跟著 `mms:current` 的名稱走；裝置欄位每次更新成目前的裝置。
+
+### 防止兩台裝置互相覆蓋
+
+每筆存檔有一個內容版本號 `rev`：新建是 1，每次覆寫內容 +1；改名、釘選不會改變它。
+
+- 每台裝置記住自己最後同步到的版本（`localStorage['mms:autosave-rev']`）。載入自動儲存的存檔、自動儲存上傳成功時更新。
+- 自動儲存上傳時帶上 `baseRev`。雲端版本和它不同，代表另一台裝置已經更新過，Worker 回 `409`，**不覆寫**。
+- Worker 寫入時用 R2 的條件寫入（`onlyIf: { etagMatches }`），讀取到寫入之間被其他請求改過就重讀再判斷。所以就算兩台在同一瞬間上傳，也只有一台成功。改名、釘選也改成條件寫入，不會把同時上傳的新內容蓋回舊的。
+- 衝突時：
+  - 自動儲存暫停，衝突記在 `localStorage['mms:autosave-conflict']`，重新整理後仍然有效。
+  - 🚇 按鈕變成 ⚠️ 並加上橘色外框；面板的自動儲存顯示「已暫停（雲端有衝突）」。
+  - 面板上方顯示是哪台裝置、什麼時間更新的，並提供三個選項：
+
+| 選項 | 作用 |
+|---|---|
+| 載入雲端版本 | 走一般的載入流程：先把這台的進度存成「匯入前自動備份」，再載入雲端最新版，之後接續更新同一筆 |
+| 另存成新存檔 | 把這台的進度存成一筆新的自動儲存（名稱加上「（裝置名稱）」），之後改更新這一筆；原本那筆不動 |
+| 仍然覆蓋 | 以剛才看到的雲端版本為基準覆寫（確認後執行）。被蓋掉的版本仍可從[歷史版本](#歷史版本)找回；這段時間又被更新的話會再次提醒 |
+
+- 只有「本機有變動、要上傳」時才會發現衝突。兩台都只是開著沒動，不會提醒。
+- 這個功能之前就開始的自動儲存，本機還沒有記錄版本，第一次上傳不帶 `baseRev`、照舊覆寫並記下版本，之後才開始檢查。舊存檔在 R2 上沒有 `rev`，視為 0。
+- 管理介面的「解鎖全部」寫回時也帶 `baseRev`，避免蓋掉同時進來的自動儲存。
+- 還沒重新整理、仍在跑舊版程式的遊戲分頁不帶 `baseRev`，照舊覆寫。更新後請重新整理各裝置的遊戲頁。
 
 ### 歷史版本
 
@@ -516,6 +539,7 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | `MAX_BODY` | `20 * 1024 * 1024`（20 MB） | 請求 `Content-Length` 上限，超過回 `413 存檔太大` |
 | `VERSION_PREFIX` | `v/` | 歷史版本的 R2 key 前綴 |
 | `VERSION_MIN_GAP` | 15 分鐘 | 被覆寫的舊內容距上一個版本不到這個時間就不另存 |
+| `WRITE_RETRIES` | 3 | `PUT`／`PATCH` 的 R2 條件寫入（`etagMatches`）失敗時重讀再試的次數，用完回 `409` |
 | `VERSION_TIERS` | 2h 全留、24h 每小時、30d 每天、180d 每週 | 歷史版本保留規則，超過最後一段刪除 |
 | `USERSCRIPT_VERSION` | `1.0.0` | userscript 的 `@version`；只有 userscript 本身內容改變時才需要調高，讓管理器提示更新 |
 | 密碼錯誤延遲 | 800 ms | 減緩暴力猜密碼 |
@@ -552,6 +576,8 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | `CURRENT_KEY` | `mms:current` | 目前進度對應的存檔 `{id, name, source}` |
 | `AUTOSAVE_ID_KEY` | `mms:autosave-id` | 自動儲存要更新的存檔 id |
 | `AUTOSAVE_HASH_KEY` | `mms:autosave-hash` | 上次自動儲存（或載入）時的進度雜湊 |
+| `AUTOSAVE_REV_KEY` | `mms:autosave-rev` | 這台最後同步到的雲端內容版本 |
+| `CONFLICT_KEY` | `mms:autosave-conflict` | 上傳時發現的版本衝突，解決前暫停自動儲存 |
 | BroadcastChannel | `mms`，訊息 `flush` / `freeze` / `unfreeze` / `reload` | 同網域分頁之間協調 |
 | 裝置名稱 | 自動判斷 `iPhone`/`iPad`/`Android`/`Mac`/`Windows`/`Linux` · `Edge`/`Chrome`/`Firefox`/`Safari`；在 `/play/` 會加上「（我的網域）」 | 可在該網域的 localStorage 設定 `mms:device` 自訂 |
 
@@ -602,7 +628,7 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | `POST` | `/api/snapshots` | `{"name","device","source","pinned","data"}` | `201 {"snapshot":Meta}` |
 | `GET` | `/api/snapshots/:id` | — | `{"snapshot":Meta,"data":Data}` |
 | `PATCH` | `/api/snapshots/:id` | `{"name"?, "pinned"?}` | `{"snapshot":Meta}`，只改 metadata |
-| `PUT` | `/api/snapshots/:id` | `{"data","name"?,"device"?}` | `{"snapshot":Meta}`，覆寫內容；保留建立時間、來源、釘選。覆寫前會依[歷史版本](#歷史版本)規則保存舊內容 |
+| `PUT` | `/api/snapshots/:id` | `{"data","name"?,"device"?,"baseRev"?}` | `{"snapshot":Meta}`，覆寫內容並把 `rev` +1；保留建立時間、來源、釘選。覆寫前會依[歷史版本](#歷史版本)規則保存舊內容。帶 `baseRev` 且和雲端 `rev` 不同時回 `409 {"error","conflict":true,"snapshot":Meta}`（雲端目前的資訊），不覆寫；同時寫入重試 3 次仍失敗也回 `409` |
 | `DELETE` | `/api/snapshots/:id` | — | `{"ok":true}`；如果它是待匯入，會一起清除；歷史版本也一起刪除 |
 | `GET` | `/api/snapshots/:id/versions` | — | `{"versions":[Version...]}`，由新到舊；存檔不存在 `404` |
 | `GET` | `/api/snapshots/:id/versions/:vid` | — | `{"version":Version,"data":Data}`；版本不存在 `404` |
@@ -613,7 +639,7 @@ npx wrangler r2 bucket delete metromastersync-saves  # bucket 必須是空的才
 | `GET` | `/mms.user.js` | — | 原網站用的 userscript，`@match` 原遊戲網址，載入 `<本站>/inject.js?mode=auto`；`Cache-Control: no-cache` |
 | `GET`/`HEAD` | `/play`、`/play/*` | Cookie `mms_session` | 轉接 `GAME_ORIGIN`。`/play` 會 `301` 到 `/play/`；未登入 `302` 到 `/?next=play` |
 
-其他錯誤碼：`400`（JSON 格式錯誤、存檔格式錯誤、空存檔、key 不合法）、`404`（找不到存檔／API）、`413`（超過 20MB）、`500`（未設定密碼或伺服器錯誤）。
+其他錯誤碼：`409`（`PUT` 版本衝突，或 `PATCH`／`PUT` 同時被其他請求寫入）、`400`（JSON 格式錯誤、存檔格式錯誤、空存檔、key 不合法）、`404`（找不到存檔／API）、`413`（超過 20MB）、`500`（未設定密碼或伺服器錯誤）。
 
 範例：
 
@@ -671,6 +697,7 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
   "createdAt": 1761811200000,
   "updatedAt": 1761814800000,
   "pinned": false,
+  "rev": 3,
   "size": 48213,
   "keyCount": 14,
   "summary": {
@@ -684,6 +711,7 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
 |---|---|
 | `source` | `manual`、`auto-save`、`auto-backup`、`upload`，也可以是其他自訂字串 |
 | `createdAt` / `updatedAt` | 毫秒時間戳 |
+| `rev` | 內容版本號：新建是 1，每次 `PUT` 覆寫內容 +1，改名、釘選不變；這個功能之前建立的存檔是 0 |
 | `size` | R2 物件大小（bytes） |
 | `summary.slots[].c` | 城市代碼 |
 | `summary.slots[].p` | 計劃編號（數字，`planlist` 裡的順序，從 1 開始；不在清單裡是 `"?"`；舊版存檔是 `~N` 的 N），或挑戰 `q:<代碼>` |
@@ -731,6 +759,8 @@ curl -s $BASE/api/snapshots/<id> -H "Authorization: Bearer $TOKEN" | jq .data > 
 | `mms:autosave-on` | 你的網域、原網站 | 自動儲存開關 |
 | `mms:autosave-id` | 你的網域、原網站 | 自動儲存更新的存檔 id |
 | `mms:autosave-hash` | 你的網域 / 原網站 | 上次自動儲存或載入的雜湊 |
+| `mms:autosave-rev` | 你的網域、原網站 | 這台最後同步到的雲端內容版本，自動儲存上傳時當作 `baseRev` |
+| `mms:autosave-conflict` | 你的網域、原網站 | 雲端已被其他裝置更新時的資訊 `{id,name,rev,device,updatedAt}`；有值時暫停自動儲存 |
 | `mms:autosave-last` | 你的網域、原網站 | 上次自動儲存時間 |
 | `mms:device` | 任一 | 選填，自訂裝置名稱 |
 | `mms:unlock-all` | 你的網域、原網站 | 選填，`'1'` 開啟「解鎖全部功能」（預設關閉）；開啟後本機存檔/自動儲存補 `owned:true` |
@@ -805,7 +835,7 @@ npm run dev                                # wrangler dev，預設 http://localh
 
 ## 已知限制
 
-- 兩台裝置**同時**開著同一筆自動儲存在玩，會互相覆蓋，雲端留下最後上傳的那份。換裝置前先關掉另一台的遊戲。
+- 兩台裝置同時開著同一筆自動儲存在玩時，後上傳的那台會被擋下並提醒（見[防止兩台裝置互相覆蓋](#防止兩台裝置互相覆蓋)），但仍要自己選擇保留哪一份；兩邊的變更不會自動合併。
 - 原網站用書籤時，自動儲存要先點一次書籤才會啟動，重新整理或重新開啟遊戲後要再點一次；用 userscript 就沒有這個限制。
 - userscript 需要瀏覽器支援擴充功能。Android 版 Chrome 不行，請改用 Firefox；把遊戲「加入主畫面」以 App 模式開啟時，userscript 和書籤都不會執行。
 - `/play/` 不能使用遊戲帳號相關功能：Google／Apple 登入、排行榜、自訂帳號名稱、帳號買斷，以及遊戲內建的雲端同步。遊戲的 Firebase 只允許原網站登入，API 金鑰也限制了來源網域，帳號後端還有 App Check（reCAPTCHA Enterprise）。要用這些功能請在原網站玩。

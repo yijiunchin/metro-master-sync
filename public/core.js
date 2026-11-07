@@ -13,6 +13,10 @@
   // 自動儲存寫入的雲端存檔 id，以及上次自動儲存時的進度雜湊
   const AUTOSAVE_ID_KEY = 'mms:autosave-id';
   const AUTOSAVE_HASH_KEY = 'mms:autosave-hash';
+  // 這台裝置最後同步到的雲端內容版本（rev），上傳時帶上，雲端被別台更新過就不覆寫
+  const AUTOSAVE_REV_KEY = 'mms:autosave-rev';
+  // 上傳時發現雲端已被別台更新：{id, name, rev, device, updatedAt}，解決前暫停自動儲存
+  const CONFLICT_KEY = 'mms:autosave-conflict';
 
   // 統計快取（遊戲可重算，不上傳）：stats、pstats.<id>、qstats.<slug>，可帶 ~N、@城市
   const isStatsCache = (k) => k.startsWith(PFX + 'v4:') && /^[pq]?stats[~.@]|^[pq]?stats$/.test(k.slice(19));
@@ -170,7 +174,10 @@
       origSet.call(localStorage, IMPORT_MARK, String(Date.now()));
       if (meta) {
         setCurrent(meta);
-        set(AUTOSAVE_ID_KEY, meta.source === 'auto-save' ? meta.id : null);
+        const isAuto = meta.source === 'auto-save';
+        set(AUTOSAVE_ID_KEY, isAuto ? meta.id : null);
+        set(AUTOSAVE_REV_KEY, isAuto && Number.isFinite(meta.rev) ? String(meta.rev) : null);
+        set(CONFLICT_KEY, null);
         set(AUTOSAVE_HASH_KEY, hashData(data));
       }
     } catch (err) {
@@ -240,7 +247,7 @@
       });
       const body = await res.json().catch(() => ({}));
       if (res.status === 401 && !path.startsWith('/api/login')) onUnauthorized?.();
-      if (!res.ok) throw new Error(body.error || 'HTTP ' + res.status);
+      if (!res.ok) throw Object.assign(new Error(body.error || 'HTTP ' + res.status), { status: res.status, body });
       return body;
     };
   }
@@ -507,6 +514,8 @@
     CURRENT_KEY,
     AUTOSAVE_ID_KEY,
     AUTOSAVE_HASH_KEY,
+    AUTOSAVE_REV_KEY,
+    CONFLICT_KEY,
     parseUnlock,
     unlockOwned,
     applyUnlockAll,
