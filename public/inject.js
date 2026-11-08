@@ -1,5 +1,5 @@
 // 遊戲頁上的存檔同步面板。
-// - 原網站 + 書籤：每點一次開／關面板。
+// - 原網站 + 書籤：每點一次開／關面板；第一次點之後放上浮動按鈕，關掉面板也能再打開（重新整理前有效）。
 // - 原網站 + userscript（inject.js?mode=auto）：每次開遊戲自動載入，顯示浮動按鈕並自動儲存。
 // - /play/ 我的網域版：由 worker 直接插入頁面，顯示浮動按鈕。
 (() => {
@@ -27,6 +27,10 @@
   // 🚇 按鈕與計算監測面板拖動後的位置 {x,y}（每台裝置、每個網域分開）
   const FAB_POS_KEY = 'mms:fab-pos';
   const MON_POS_KEY = 'mms:monitor-pos';
+  // 本機空間：用量 ≥ 70% 在面板標黃色，≥ 85% 或遊戲寫入失敗時 🚇 按鈕變 ⚠️ 提醒（見 storageState）
+  const STORAGE_WARN = 0.7;
+  const STORAGE_FULL = 0.85;
+  let storageCache = null;
 
   // 讀本機進度；勾了「解鎖全部」就一併把 transit-planner:v4:unlock 補成 owned
   function readGame(C) {
@@ -67,11 +71,25 @@
 
     if (!resident) {
       // 第一次點書籤後就在這個分頁啟動自動儲存（重新整理頁面後要再點一次書籤）
+      let bmError = null;
+      const bmLogin = async () => {
+        if (getToken()) return true;
+        try {
+          await C.loginWithGame(API);
+          bmError = null;
+          return true;
+        } catch (err) {
+          bmError = err.message;
+          return false;
+        }
+      };
       const open = () => {
         if (!window.__MMS_AUTO__) {
           window.__MMS_AUTO__ = createAutoSave(C, getToken, () => !cfg.token && C.set(C.TOKEN_KEY, null));
           window.__MMS_AUTO__.run();
         }
+        // 手機點書籤要從網址列找，不方便：放上 🚇 按鈕，關掉面板後也能從按鈕再打開
+        addFab(C, getToken, window.__MMS_AUTO__, bmLogin, () => bmError);
         togglePanel(C, getToken, window.__MMS_AUTO__);
       };
       if (getToken() || document.getElementById('mms-host')) return open();
@@ -126,75 +144,6 @@
     const auto = createAutoSave(C, getToken, dropToken);
     window.__MMS_AUTO__ = auto;
 
-    const addFab = () => {
-      const fab = document.createElement('button');
-      fab.id = 'mms-fab';
-      fab.type = 'button';
-      fab.textContent = '🚇';
-      fab.title = '存檔同步';
-      fab.setAttribute('aria-label', '存檔同步');
-      fab.style.cssText =
-        'position:fixed;z-index:2147483646;left:12px;top:calc(env(safe-area-inset-top) + 64px);width:40px;height:40px;' +
-        'border-radius:50%;border:0;background:rgba(255,255,255,.92);box-shadow:0 2px 10px rgba(0,0,0,.25);font-size:20px;' +
-        'line-height:40px;padding:0;cursor:pointer;touch-action:none;';
-      let justDragged = () => false;
-      fab.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        if (justDragged()) return; // 拖動放開時不要打開面板
-        if (!document.getElementById('mms-host')) {
-          const ok = await ensureLogin();
-          mark();
-          if (!ok) return alert('無法用遊戲帳號登入：' + loginError);
-        }
-        togglePanel(C, getToken, auto);
-      });
-      document.body.appendChild(fab);
-      justDragged = draggable(fab, FAB_POS_KEY);
-      // 還沒登入時按鈕半透明，提示需要先在遊戲裡登入帳號
-      const mark = () => {
-        const ok = onPlay || !!getToken();
-        const conflict = auto.conflict();
-        const st = storageState(C);
-        const full = st.level === 'full';
-        fab.style.opacity = ok ? '1' : '.55';
-        fab.textContent = conflict || full ? '⚠️' : '🚇';
-        fab.style.boxShadow = conflict
-          ? '0 0 0 3px #f0a020, 0 2px 10px rgba(0,0,0,.25)'
-          : full
-            ? '0 0 0 3px #d1242f, 0 2px 10px rgba(0,0,0,.25)'
-            : '0 2px 10px rgba(0,0,0,.25)';
-        fab.title = conflict
-          ? '存檔同步：' + auto.conflictText(conflict) + '，點開處理'
-          : full
-            ? '存檔同步：' + (st.err ? '本機空間不足，遊戲有資料沒存進去' : `本機空間已用 ${Math.round(st.ratio * 100)}%`) + '，點開查看'
-          : ok
-            ? '存檔同步'
-            : '存檔同步（尚未登入：' + (loginError || '請在遊戲裡登入帳號') + '）';
-      };
-      auto.onChange(mark);
-      C.onQuotaError(() => {
-        storageCache = null;
-        mark();
-      });
-      // 容量還沒量過（或超過 30 天、換了瀏覽器版本）：遊戲載入完、閒置時量一次
-      if (C.capacityStale()) {
-        setTimeout(() => {
-          const run = () => {
-            try {
-              C.measureCapacity();
-            } catch {}
-            storageCache = null;
-            mark();
-          };
-          window.requestIdleCallback ? requestIdleCallback(run, { timeout: 10000 }) : run();
-        }, 20000);
-      }
-      // 其他分頁（同網域）發現衝突或處理完時也跟著更新
-      window.addEventListener('storage', (e) => e.key === C.CONFLICT_KEY && mark());
-      mark();
-      ensureLogin().then(mark);
-      document.addEventListener('visibilitychange', () => !document.hidden && !getToken() && ensureLogin().then(mark));
-    };
     // 手機開啟時的「下載 App」對話框：自動選「在網頁玩」
     const skipGetApp = () => {
       const check = () => document.querySelector('.get-app .play-web')?.click();
@@ -202,18 +151,88 @@
       new MutationObserver(check).observe(document.body, { childList: true });
     };
     const onBody = () => {
-      addFab();
+      addFab(C, getToken, auto, ensureLogin, () => loginError);
       if (onPlay) skipGetApp();
     };
     if (document.body) onBody();
     else document.addEventListener('DOMContentLoaded', onBody);
   }
 
+  // 🚇 浮動按鈕：常駐模式開遊戲就放上；書籤模式在第一次點書籤後放上，關掉面板也還能再打開（同一個分頁內）
+  // ensureLogin()：確保已登入（必要時用遊戲帳號換發）；loginError()：最近一次登入失敗的原因
+  function addFab(C, getToken, auto, ensureLogin, loginError) {
+    if (document.getElementById('mms-fab')) return;
+    const fab = document.createElement('button');
+    fab.id = 'mms-fab';
+    fab.type = 'button';
+    fab.textContent = '🚇';
+    fab.title = '存檔同步';
+    fab.setAttribute('aria-label', '存檔同步');
+    fab.style.cssText =
+      'position:fixed;z-index:2147483646;left:12px;top:calc(env(safe-area-inset-top) + 64px);width:40px;height:40px;' +
+      'border-radius:50%;border:0;background:rgba(255,255,255,.92);box-shadow:0 2px 10px rgba(0,0,0,.25);font-size:20px;' +
+      'line-height:40px;padding:0;cursor:pointer;touch-action:none;';
+    let justDragged = () => false;
+    fab.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (justDragged()) return; // 拖動放開時不要打開面板
+      if (!document.getElementById('mms-host')) {
+        const ok = await ensureLogin();
+        mark();
+        if (!ok) return alert('無法用遊戲帳號登入：' + loginError);
+      }
+      togglePanel(C, getToken, auto);
+    });
+    document.body.appendChild(fab);
+    justDragged = draggable(fab, FAB_POS_KEY);
+    // 還沒登入時按鈕半透明，提示需要先在遊戲裡登入帳號
+    const mark = () => {
+      const ok = onPlay || !!getToken();
+      const conflict = auto.conflict();
+      const st = storageState(C);
+      const full = st.level === 'full';
+      fab.style.opacity = ok ? '1' : '.55';
+      fab.textContent = conflict || full ? '⚠️' : '🚇';
+      fab.style.boxShadow = conflict
+        ? '0 0 0 3px #f0a020, 0 2px 10px rgba(0,0,0,.25)'
+        : full
+          ? '0 0 0 3px #d1242f, 0 2px 10px rgba(0,0,0,.25)'
+          : '0 2px 10px rgba(0,0,0,.25)';
+      fab.title = conflict
+        ? '存檔同步：' + auto.conflictText(conflict) + '，點開處理'
+        : full
+          ? '存檔同步：' + (st.err ? '本機空間不足，遊戲有資料沒存進去' : `本機空間已用 ${Math.round(st.ratio * 100)}%`) + '，點開查看'
+        : ok
+          ? '存檔同步'
+          : '存檔同步（尚未登入：' + (loginError || '請在遊戲裡登入帳號') + '）';
+    };
+    auto.onChange(mark);
+    C.onQuotaError(() => {
+      storageCache = null;
+      mark();
+    });
+    // 容量還沒量過（或超過 30 天、換了瀏覽器版本）：遊戲載入完、閒置時量一次
+    if (C.capacityStale()) {
+      setTimeout(() => {
+        const run = () => {
+          try {
+            C.measureCapacity();
+          } catch {}
+          storageCache = null;
+          mark();
+        };
+        window.requestIdleCallback ? requestIdleCallback(run, { timeout: 10000 }) : run();
+      }, 20000);
+    }
+    // 其他分頁（同網域）發現衝突或處理完時也跟著更新
+    window.addEventListener('storage', (e) => e.key === C.CONFLICT_KEY && mark());
+    mark();
+    ensureLogin().then(mark);
+    document.addEventListener('visibilitychange', () => !document.hidden && !getToken() && ensureLogin().then(mark));
+  }
+
   // ---------- 本機空間 ----------
-  // 用量 ≥ 70% 在面板標黃色，≥ 85% 或遊戲寫入失敗時 🚇 按鈕變 ⚠️ 提醒
-  const STORAGE_WARN = 0.7;
-  const STORAGE_FULL = 0.85;
-  let storageCache = null;
+  // 門檻與快取宣告在檔案開頭（start() 可能在這裡之前就同步執行）
   function storageState(C, fresh = false) {
     if (!fresh && storageCache && Date.now() - storageCache.t < 60000) return storageCache;
     const u = C.storageUsage();
@@ -223,7 +242,9 @@
     const level = err || (ratio != null && ratio >= STORAGE_FULL) ? 'full' : ratio != null && ratio >= STORAGE_WARN ? 'warn' : 'ok';
     return (storageCache = { t: Date.now(), ...u, cap, ratio, err, level });
   }
-  const fmtMB = (n) => (n / 1048576).toFixed(n < 1048576 ? 2 : 1) + ' MB';
+  function fmtMB(n) {
+    return (n / 1048576).toFixed(n < 1048576 ? 2 : 1) + ' MB';
+  }
 
   // ---------- 拖動並記住位置 ----------
   // el 是 position:fixed 的元素；在 handle 上按住移動超過 5px 才算拖動（短按仍是點擊）。
