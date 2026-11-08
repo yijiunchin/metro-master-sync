@@ -353,6 +353,13 @@ async function proxyGame(request, env, url) {
         // 隱藏自家推廣廣告的蓋版倒數；遊戲偵測到廣告被隱藏時會直接給獎勵並關閉
         el.append(
           '<style>.promo-sheet{display:none!important}</style>' +
+            // 加入主畫面：以全螢幕 App 開啟 /play/（遊戲本身沒有 manifest）。iOS 主畫面圖示只吃 PNG
+            '<link rel="manifest" href="/app/manifest.webmanifest">' +
+            '<link rel="apple-touch-icon" href="/app/apple-touch-icon.png">' +
+            '<meta name="mobile-web-app-capable" content="yes">' +
+            '<meta name="apple-mobile-web-app-capable" content="yes">' +
+            '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">' +
+            '<meta name="apple-mobile-web-app-title" content="捷運規劃大師">' +
             '<script src="/core.js"></script><script src="/inject.js"></script>',
           { html: true },
         );

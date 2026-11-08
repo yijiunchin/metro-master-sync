@@ -45,6 +45,7 @@
 | 遊戲內 Google／Apple 登入（排行榜等） | 不能用（遊戲的 Firebase 只允許原網站） | 可以 |
 | 管理介面一鍵載入 | 有 | 要先設成「待匯入」，再到遊戲頁打開 🚇 面板 |
 | 跳過推廣廣告倒數 | 有 | 沒有 |
+| 加入手機主畫面、以全螢幕 App 開啟 | 可以，🚇 按鈕和自動儲存照常運作 | 主畫面 App 沒有書籤可點；userscript 在主畫面 App 裡也不會執行 |
 | 進度存放位置 | 你的網域的 localStorage | 原網站的 localStorage |
 
 兩種方式的進度**互不相通**（存在不同網域），但都可以存到同一份雲端，所以能透過雲端互相轉移。
@@ -74,7 +75,30 @@
    - **自動儲存**勾選框：說明見[自動儲存](#自動儲存)。旁邊顯示「上次 HH:MM」或「失敗：原因」。
    - **存檔列表**：最多顯示 50 筆，依最後更新時間排序，按「載入」就能覆蓋目前進度。
    - **固定顯示計算監測面板**、**排行榜檢查**：說明見[計算監測與排行榜檢查](#計算監測與排行榜檢查)。
-4. 手機可以用「加入主畫面」把 `/play/` 當成 App 開。
+4. 手機可以把 `/play/` 加入主畫面，當成全螢幕 App 開，見下一節。
+
+#### 加入手機主畫面
+
+在 `/play/` 遊戲頁面：
+
+- **iPhone／iPad（Safari）**：分享 → 加入主畫面。
+- **Android（Chrome）**：⋮ → 加入主畫面（或「安裝應用程式」）。
+
+之後從主畫面圖示開啟，就是沒有網址列的全螢幕 App，🚇 按鈕、自動儲存、計算監測都照常運作。圖示是本站自己的（深藍底、兩條路線交會、站內有同步箭頭），和原網站的圖示分得出來。
+
+| 項目 | 設定 |
+|---|---|
+| manifest | `public/app/manifest.webmanifest`：`start_url` `/play/`、`scope` `/`（登入頁也在 App 內，不會跳出瀏覽器）、`display` `fullscreen`（不支援時退回 `standalone`） |
+| 圖示 | `public/app/icon.svg`（原始檔）、`icon-192.png`、`icon-512.png`（也當 maskable，重要內容都在中央 80% 內）、`apple-touch-icon.png`（180px，iOS 只吃 PNG） |
+| 插入的標籤 | Worker 轉接遊戲頁時，在 `<head>` 插入 `<link rel="manifest">`、`<link rel="apple-touch-icon">`、`mobile-web-app-capable`、`apple-mobile-web-app-capable`、`apple-mobile-web-app-status-bar-style=black-translucent`（畫面延伸到狀態列下方，遊戲本身已處理安全區域）、`apple-mobile-web-app-title` |
+| service worker | 沒有。遊戲每次都從原網站轉接最新版，不做離線快取 |
+
+**iPhone／iPad 要注意**：主畫面 App 的 Cookie 和 localStorage 和 Safari 分開。第一次開啟時：
+
+1. 會先看到登入頁，用密碼登入（遊戲帳號登入要靠書籤，這裡不能用）。
+2. 遊戲進度是空的，按 🚇 →「載入」把雲端存檔載進來。之後自動儲存就會在 App 裡運作。
+
+Safari 裡的 `/play/` 和主畫面 App 是兩份獨立的進度，兩邊都開自動儲存時，靠[防止兩台裝置互相覆蓋](#防止兩台裝置互相覆蓋)避免互相蓋掉。Android Chrome 的主畫面 App 和 Chrome 共用資料，不用重新登入或載入。
 
 `/play/` 另外做了這些處理：
 
@@ -887,6 +911,7 @@ metro-master-sync/
 │  ├─ index.html                # 管理介面
 │  ├─ core.js                   # 共用：讀寫 localStorage、凍結寫入、雜湊、API client
 │  ├─ history.js                # 管理介面：成長圖表與版本比較
+│  ├─ app/                      # /play/ 加入主畫面用的 manifest 與圖示
 │  └─ inject.js                 # 遊戲頁上的 🚇 面板、自動儲存、略過下載 App 對話框
 └─ .github/workflows/deploy.yml # push 到 main 時自動部署
 ```

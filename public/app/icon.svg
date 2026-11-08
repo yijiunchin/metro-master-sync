@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <!-- Metro Master Sync 我的網域版：兩條路線在轉乘站交會，站內是同步箭頭。重要內容在中央 80% 內，可當 maskable 圖示 -->
+  <rect width="512" height="512" fill="#16324F"/>
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round" stroke-width="44">
+    <path d="M -40 352 L 136 352 Q 176 352 204 324 L 228 300" stroke="#F0A020"/>
+    <path d="M 284 212 L 308 188 Q 336 160 376 160 L 552 160" stroke="#F0A020"/>
+    <path d="M 160 -40 L 160 120 Q 160 160 188 188 L 212 212" stroke="#4593F0"/>
+    <path d="M 300 300 L 324 324 Q 352 352 352 392 L 352 552" stroke="#4593F0"/>
+  </g>
+  <circle cx="256" cy="256" r="92" fill="#FFFFFF" stroke="#16324F" stroke-width="14"/>
+  <g fill="none" stroke="#16324F" stroke-width="20" stroke-linecap="round">
+    <path d="M 212 240 A 46 46 0 0 1 292 226"/>
+    <path d="M 300 272 A 46 46 0 0 1 220 286"/>
+  </g>
+  <path d="M 304 204 L 302 240 L 268 230 Z" fill="#16324F"/>
+  <path d="M 208 308 L 210 272 L 244 282 Z" fill="#16324F"/>
+</svg>
