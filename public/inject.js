@@ -154,16 +154,41 @@
       const mark = () => {
         const ok = onPlay || !!getToken();
         const conflict = auto.conflict();
+        const st = storageState(C);
+        const full = st.level === 'full';
         fab.style.opacity = ok ? '1' : '.55';
-        fab.textContent = conflict ? '⚠️' : '🚇';
-        fab.style.boxShadow = conflict ? '0 0 0 3px #f0a020, 0 2px 10px rgba(0,0,0,.25)' : '0 2px 10px rgba(0,0,0,.25)';
+        fab.textContent = conflict || full ? '⚠️' : '🚇';
+        fab.style.boxShadow = conflict
+          ? '0 0 0 3px #f0a020, 0 2px 10px rgba(0,0,0,.25)'
+          : full
+            ? '0 0 0 3px #d1242f, 0 2px 10px rgba(0,0,0,.25)'
+            : '0 2px 10px rgba(0,0,0,.25)';
         fab.title = conflict
           ? '存檔同步：' + auto.conflictText(conflict) + '，點開處理'
+          : full
+            ? '存檔同步：' + (st.err ? '本機空間不足，遊戲有資料沒存進去' : `本機空間已用 ${Math.round(st.ratio * 100)}%`) + '，點開查看'
           : ok
             ? '存檔同步'
             : '存檔同步（尚未登入：' + (loginError || '請在遊戲裡登入帳號') + '）';
       };
       auto.onChange(mark);
+      C.onQuotaError(() => {
+        storageCache = null;
+        mark();
+      });
+      // 容量還沒量過（或超過 30 天、換了瀏覽器版本）：遊戲載入完、閒置時量一次
+      if (C.capacityStale()) {
+        setTimeout(() => {
+          const run = () => {
+            try {
+              C.measureCapacity();
+            } catch {}
+            storageCache = null;
+            mark();
+          };
+          window.requestIdleCallback ? requestIdleCallback(run, { timeout: 10000 }) : run();
+        }, 20000);
+      }
       // 其他分頁（同網域）發現衝突或處理完時也跟著更新
       window.addEventListener('storage', (e) => e.key === C.CONFLICT_KEY && mark());
       mark();
@@ -183,6 +208,22 @@
     if (document.body) onBody();
     else document.addEventListener('DOMContentLoaded', onBody);
   }
+
+  // ---------- 本機空間 ----------
+  // 用量 ≥ 70% 在面板標黃色，≥ 85% 或遊戲寫入失敗時 🚇 按鈕變 ⚠️ 提醒
+  const STORAGE_WARN = 0.7;
+  const STORAGE_FULL = 0.85;
+  let storageCache = null;
+  function storageState(C, fresh = false) {
+    if (!fresh && storageCache && Date.now() - storageCache.t < 60000) return storageCache;
+    const u = C.storageUsage();
+    const cap = C.storageCapacity();
+    const ratio = cap ? u.used / cap : null;
+    const err = C.lastQuotaError();
+    const level = err || (ratio != null && ratio >= STORAGE_FULL) ? 'full' : ratio != null && ratio >= STORAGE_WARN ? 'warn' : 'ok';
+    return (storageCache = { t: Date.now(), ...u, cap, ratio, err, level });
+  }
+  const fmtMB = (n) => (n / 1048576).toFixed(n < 1048576 ? 2 : 1) + ' MB';
 
   // ---------- 拖動並記住位置 ----------
   // el 是 position:fixed 的元素；在 handle 上按住移動超過 5px 才算拖動（短按仍是點擊）。
@@ -646,6 +687,20 @@
   .pending span { flex: 1; }
   .conflict { background: #fff1e0; color: #6b3a00; border-radius: 10px; padding: 10px 12px; margin-top: 10px; font-size: 13px; line-height: 1.5; }
   .conflict .acts { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .storage { margin-top: 10px; padding-top: 10px; border-top: 1px solid #e3e6ea; font-size: 13px; }
+  .storage .row { display: flex; align-items: baseline; gap: 6px; }
+  .storage .row span { flex: 1; }
+  .storage .bar { height: 6px; border-radius: 3px; background: rgba(127,127,127,.22); overflow: hidden; margin-top: 5px; }
+  .storage .bar i { display: block; height: 100%; background: #1a73e8; border-radius: 3px; }
+  .storage.warn .bar i { background: #f0a020; }
+  .storage.full .bar i { background: #d1242f; }
+  .storage .alert { background: #ffebe9; color: #82071e; border-radius: 10px; padding: 10px 12px; margin-top: 8px; line-height: 1.5; }
+  .storage .alert .acts { display: flex; gap: 6px; margin-top: 8px; }
+  .storage table { border-collapse: collapse; width: 100%; font-size: 12px; margin-top: 6px; }
+  .storage td { padding: 2px 6px 2px 0; border-bottom: 1px solid rgba(127,127,127,.18); }
+  .storage td.n { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .storage summary { cursor: pointer; color: #6a737d; font-size: 12px; margin-top: 6px; }
+  @media (prefers-color-scheme: dark) { .storage .alert { background: #3d1418; color: #ffa198; } .storage { border-color: #30363d; } }
   .item { display: flex; gap: 10px; align-items: center; padding: 9px 0; border-bottom: 1px solid #eef0f2; }
   .item .info { flex: 1; min-width: 0; }
   .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -693,6 +748,7 @@
     <label class="unlock"><input type="checkbox" id="monitor" /> 固定顯示計算監測面板</label>
     <div class="tools"><button data-act="board">排行榜檢查</button></div>
     <div id="board" class="board" hidden></div>
+    <div id="storage" class="storage"></div>
     <div id="conflict"></div>
     <div class="status" id="status"></div>
     <div id="pending"></div>
@@ -850,6 +906,9 @@
           const box = $('#board');
           box.hidden = !box.hidden;
           if (!box.hidden) renderBoard(box);
+        } else if (act === 'quota-ok') {
+          C.clearQuotaError();
+          renderStorage();
         } else if (act === 'board-refresh') {
           renderBoard($('#board'));
         } else if (act === 'conflict-fork') {
@@ -916,6 +975,40 @@
         <div class="tools"><button data-act="board-refresh">重新整理</button></div>`;
       box.innerHTML = html;
     }
+    // 本機空間：開面板時重算；容量沒量過就先量（約 0.1 秒）
+    function renderStorage() {
+      if (C.capacityStale()) {
+        try {
+          C.measureCapacity();
+        } catch {}
+      }
+      const st = storageState(C, true);
+      const box = $('#storage');
+      box.className = 'storage ' + st.level;
+      const pct = st.ratio == null ? null : Math.min(100, st.ratio * 100);
+      const pctText = pct == null ? '' : pct < 1 ? '不到 1%' : Math.round(pct) + '%';
+      let html = `<div class="row"><span>本機空間</span><b>${fmtMB(st.used)}</b><span class="muted" style="flex:none;margin:0">${st.cap ? `／約 ${fmtMB(st.cap)}（${pctText}）` : '（容量無法測量）'}</span></div>`;
+      if (pct != null) html += `<div class="bar" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(pct)}" aria-label="本機空間用量"><i style="width:${Math.max(1, pct)}%"></i></div>`;
+      if (st.err) {
+        html += `<div class="alert"><b>⚠️ 空間不足，遊戲有資料沒存進去</b><br>${esc(fmtTime(st.err.at))} 寫入「${esc(C.storageLabel(st.err.key))}」（${fmtMB(st.err.size)}）時失敗。
+          請先按上面的「儲存目前進度」把記憶體裡的進度備份到雲端，再到遊戲裡刪掉用不到的計劃或挑戰。
+          <div class="acts"><button data-act="quota-ok">已處理，清除提醒</button></div></div>`;
+      } else if (st.level === 'full') {
+        html += `<div class="alert"><b>⚠️ 本機空間快滿了</b><br>滿了之後遊戲會存不進去。建議先把進度存到雲端，再到遊戲裡刪掉用不到的計劃或挑戰。</div>`;
+      }
+      const g = st.groups;
+      html += `<details${st.level === 'ok' ? '' : ' open'}><summary>用量明細</summary><table>
+        <tr><td>遊戲進度</td><td class="n">${fmtMB(g.game)}</td></tr>
+        <tr><td>統計快取（遊戲可重算，不上傳）</td><td class="n">${fmtMB(g.cache)}</td></tr>
+        <tr><td>同步程式設定</td><td class="n">${fmtMB(g.mms)}</td></tr>
+        ${g.other ? `<tr><td>其他</td><td class="n">${fmtMB(g.other)}</td></tr>` : ''}
+        <tr><td colspan="2" style="padding-top:8px;font-weight:600">最大的項目</td></tr>
+        ${st.top.slice(0, 5).map((x) => `<tr><td>${esc(C.storageLabel(x.key))}</td><td class="n">${fmtMB(x.size)}</td></tr>`).join('')}
+      </table></details>`;
+      box.innerHTML = html;
+    }
+    renderStorage();
+
     const monBox = $('#monitor');
     monBox.checked = monitor.pinned();
     monBox.addEventListener('change', () => monitor.setPinned(monBox.checked));

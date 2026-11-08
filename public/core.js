@@ -17,12 +17,35 @@
   const AUTOSAVE_REV_KEY = 'mms:autosave-rev';
   // 上傳時發現雲端已被別台更新：{id, name, rev, device, updatedAt}，解決前暫停自動儲存
   const CONFLICT_KEY = 'mms:autosave-conflict';
+  // 本機空間：實測的容量快取 {cap, ua, at}，以及最近一次寫入失敗 {at, key, size}
+  const QUOTA_KEY = 'mms:quota';
+  const QUOTA_ERR_KEY = 'mms:quota-error';
 
   // 統計快取（遊戲可重算，不上傳）：stats、pstats.<id>、qstats.<slug>，可帶 ~N、@城市
   const isStatsCache = (k) => k.startsWith(PFX + 'v4:') && /^[pq]?stats[~.@]|^[pq]?stats$/.test(k.slice(19));
   const syncable = (k) => k.startsWith(PFX) && !LOCAL_ONLY.has(k);
 
   const proto = Storage.prototype;
+  const rawSet = proto.setItem;
+  // 記下 localStorage 空間不足的寫入（遊戲存檔失敗時最需要知道），再照常丟出錯誤給呼叫端
+  const isQuotaError = (e) => e && (e.name === 'QuotaExceededError' || e.name === 'NS_ERROR_DOM_QUOTA_REACHED' || e.code === 22 || e.code === 1014);
+  let quotaError = null;
+  const quotaListeners = new Set();
+  proto.setItem = function (k, v) {
+    try {
+      return rawSet.call(this, k, v);
+    } catch (e) {
+      if (this === localStorage && isQuotaError(e)) {
+        quotaError = { at: Date.now(), key: String(k), size: String(k).length + String(v).length };
+        // 空間已滿時這筆也可能寫不進去，所以同時留在記憶體
+        try {
+          rawSet.call(this, QUOTA_ERR_KEY, JSON.stringify(quotaError));
+        } catch {}
+        quotaListeners.forEach((f) => f(quotaError));
+      }
+      throw e;
+    }
+  };
   const origSet = proto.setItem;
   const origRemove = proto.removeItem;
   let frozen = false;
@@ -334,6 +357,114 @@
     return body.token;
   }
 
+  // ---------- 本機空間 ----------
+  // 瀏覽器以「字元數」計算 localStorage（key＋value，各家上限約 5MB），所以這裡也用字元數。
+  // 容量各家不同，直接實測：用一個暫存 key 寫入越來越長的字串，找出還能寫多少，結果快取 30 天。
+
+  const QUOTA_TTL = 30 * 86400000;
+  const PROBE_KEY = 'mms:probe';
+
+  function storageUsage() {
+    let used = 0;
+    const groups = { game: 0, cache: 0, mms: 0, other: 0 };
+    const items = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k === null) continue;
+      const n = k.length + (localStorage.getItem(k) || '').length;
+      used += n;
+      const g = k.startsWith(PFX) ? (isStatsCache(k) ? 'cache' : 'game') : k.startsWith('mms:') ? 'mms' : 'other';
+      groups[g] += n;
+      items.push({ key: k, size: n, group: g });
+    }
+    items.sort((a, b) => b.size - a.size);
+    return { used, groups, top: items.slice(0, 8) };
+  }
+
+  // 實測還能寫多少字元（不經過凍結與錯誤記錄，直接用原本的 setItem）
+  function probeFree() {
+    const fits = (n) => {
+      try {
+        rawSet.call(localStorage, PROBE_KEY, 'x'.repeat(n));
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    const LIMIT = 1 << 25; // 最多量到約 3,300 萬字元，再大就當成夠用
+    let lo = 0;
+    let hi = 1 << 16;
+    try {
+      while (hi <= LIMIT && fits(hi)) (lo = hi), (hi *= 2);
+      if (hi > LIMIT) return lo;
+      while (hi - lo > 4096) {
+        const mid = Math.floor((lo + hi) / 2);
+        if (fits(mid)) lo = mid;
+        else hi = mid;
+      }
+      return lo;
+    } finally {
+      origRemove.call(localStorage, PROBE_KEY);
+    }
+  }
+
+  function storageCapacity({ force = false } = {}) {
+    let c = null;
+    try {
+      c = JSON.parse(localStorage.getItem(QUOTA_KEY));
+    } catch {}
+    if (!force && c?.cap && c.ua === navigator.userAgent && Date.now() - c.at < QUOTA_TTL) return c.cap;
+    if (!force && c?.cap) return c.cap; // 過期或換了瀏覽器版本：先用舊值，等 measureCapacity() 重測
+    return null;
+  }
+  const capacityStale = () => {
+    try {
+      const c = JSON.parse(localStorage.getItem(QUOTA_KEY));
+      return !c?.cap || c.ua !== navigator.userAgent || Date.now() - c.at >= QUOTA_TTL;
+    } catch {
+      return true;
+    }
+  };
+  function measureCapacity() {
+    const before = storageUsage().used;
+    const free = probeFree();
+    const cap = before + free + PROBE_KEY.length;
+    try {
+      rawSet.call(localStorage, QUOTA_KEY, JSON.stringify({ cap, ua: navigator.userAgent, at: Date.now() }));
+    } catch {}
+    return cap;
+  }
+
+  function lastQuotaError() {
+    if (quotaError) return quotaError;
+    try {
+      return JSON.parse(localStorage.getItem(QUOTA_ERR_KEY));
+    } catch {
+      return null;
+    }
+  }
+  const clearQuotaError = () => {
+    quotaError = null;
+    origRemove.call(localStorage, QUOTA_ERR_KEY);
+    quotaListeners.forEach((f) => f(null));
+  };
+  const onQuotaError = (f) => quotaListeners.add(f);
+
+  // 用量大的 key 換成看得懂的名稱
+  function storageLabel(key) {
+    const m = /^transit-planner:v4:(?:(p|q)?(save|stats|summary)(?:\.([A-Za-z0-9_-]+)|~(\d+))?)(?:@([a-z0-9_-]+))?$/.exec(key);
+    if (!m) return key.replace(/^transit-planner:(v4:)?/, '');
+    const [, kind, what, id, n, city = DEFAULT_CITY] = m;
+    let who;
+    if (kind === 'q') who = '挑戰 ' + id;
+    else if (kind === 'p') {
+      const no = readPlanList({ [cityKey('planlist', city)]: localStorage.getItem(cityKey('planlist', city)) }, city).ids.indexOf(id);
+      who = '計劃 ' + (no < 0 ? '?' : no + 1);
+    } else who = '舊版計劃 ' + (n || 1);
+    const tail = what === 'save' ? '存檔' : what === 'stats' ? '統計快取（遊戲可重算）' : '摘要';
+    return `${city}・${who} ${tail}`;
+  }
+
   // ---------- 單一計劃 ----------
   // 第 5 版：psave.<id>[@城市]、psummary.<id>、pstats.<id>，順序記在 planlist[@城市]
   // 舊版：save[~N][@城市]（N=1 時沒有 ~1）；升級後只剩指向新 id 的指標 {"v":999,"moved":id}
@@ -541,6 +672,14 @@
     loginWithGame,
     listPlans,
     planLabel,
+    storageUsage,
+    storageCapacity,
+    capacityStale,
+    measureCapacity,
+    storageLabel,
+    lastQuotaError,
+    clearQuotaError,
+    onQuotaError,
     localPlans,
     importPlan,
     renderPlanPicker,
